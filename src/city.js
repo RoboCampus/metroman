@@ -593,8 +593,20 @@ export function buildCity(scene) {
   water.receiveShadow = true;
   scene.add(water);
 
+  // Only half of the would-be tall buildings stay tall; the rest become mid-rises. Uses a hash of
+  // the lot position instead of rng() so the rest of the city layout doesn't change.
+  const TALL = 80;
+  const hash = (x, z, k) => {
+    const v = Math.sin(x * 12.9898 + z * 78.233 + k * 37.719) * 43758.5453;
+    return v - Math.floor(v);
+  };
+  const fewerTall = (hf) => (x, z) => {
+    const h = hf(x, z);
+    return h > TALL && hash(x, z, 1) < 0.5 ? 40 + hash(x, z, 2) * 35 : h;
+  };
+
   // ---------------------------------------------------------------- Manhattan
-  const manhattanH = (x, z) => {
+  const manhattanH = fewerTall((x, z) => {
     const mid = Math.exp(-(((z + 330) / 360) ** 2));
     const down = Math.exp(-(((z - 990) / 190) ** 2));
     const parkEdge = z < -760 && z > -1340 && Math.abs(x) < 290 ? 0.45 : 0;
@@ -602,7 +614,7 @@ export function buildCity(scene) {
     let h = 14 + rng() * 22 + t * (35 + rng() * 140);
     if (rng() < 0.06 * t) h += 90 + rng() * 120;
     return h;
-  };
+  });
   // Blocks handled by landmarks: Times Square (4), Empire State, Chrysler, One WTC.
   const reserved = new Set(['2,13', '3,13', '2,14', '3,14', '2,17', '3,15', '1,34']);
   const cols = (MANHATTAN.maxX - MANHATTAN.minX) / AVE_SP;
@@ -891,10 +903,10 @@ export function buildCity(scene) {
       }
     }
   }
-  district(950, 1560, -1300, 1500, 110, 70, (x, z) =>
-    8 + rng() * 16 + (x < 1150 && z > 600 && z < 1200 ? 20 + rng() * 70 : 0));
-  district(-1560, -950, -1300, 1500, 110, 70, (x, z) =>
-    8 + rng() * 20 + (x > -1170 && z > 300 && z < 1100 ? 30 + rng() * 140 : 0));
+  district(950, 1560, -1300, 1500, 110, 70, fewerTall((x, z) =>
+    8 + rng() * 16 + (x < 1150 && z > 600 && z < 1200 ? 20 + rng() * 70 : 0)));
+  district(-1560, -950, -1300, 1500, 110, 70, fewerTall((x, z) =>
+    8 + rng() * 20 + (x > -1170 && z > 300 && z < 1100 ? 30 + rng() * 140 : 0)));
 
   // ---------------------------------------------------------------- Street lamps
   const lampPts = [];

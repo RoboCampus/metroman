@@ -256,7 +256,7 @@ export class Traffic {
     this.ctx.impacts?.hit(c.pos.clone(), null, 5, 'fire', 9);
     fx.flash(p, 0xff8030, 2500, 60, 0.5);
     // The blast hurts nearby thugs and cars (enemies.damageRadius also hits cars: chain reactions)
-    enemies.damageRadius(p, 8, 70, 16, 0, { type: 'power' });
+    enemies.damageRadius(p, 8, 70, 16, 0, { type: 'power', noBoss: true }); // a car is nothing to the kaiju
     const d = player.pos.distanceTo(c.pos);
     if (d < 7) player.takeDamage(30 * (1 - d / 7));
     player.shake(Math.max(0.15, 0.9 - d / 60), 0.5);

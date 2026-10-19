@@ -3,7 +3,7 @@ import * as THREE from 'three';
 // DCUO-style weapon combat:
 //   LMB tap = quick melee, LMB hold = lunging melee (Interrupt)
 //   RMB tap = quick ranged, RMB hold = heavy ranged (Block Breaker)
-//   Hold Q = Block. Counter triangle: Block Breaker > Block > Interrupt > Block Breaker.
+//   Hold L-Ctrl = Block (tap a direction while blocking to dodge). Counter triangle: Block Breaker > Block > Interrupt > Block Breaker.
 // Inputs chain into combos when entered in sequence.
 
 const HOLD = 0.28; // seconds a button must be held to count as "hold"
@@ -39,7 +39,7 @@ export class Combat {
     this.slots = [
       { id: 'melee', key: 'LMB', name: 'Strike · hold Lunge', icon: '👊' },
       { id: 'ranged', key: 'RMB', name: 'Blast · hold Breaker', icon: '🎯' },
-      { id: 'block', key: 'Q', name: 'Block · Breakout', icon: '🛡️', cd: 6, timer: 0 },
+      { id: 'block', key: 'Ctrl', name: 'Block · Breakout', icon: '🛡️', cd: 6, timer: 0 },
     ];
   }
 

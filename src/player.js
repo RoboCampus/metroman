@@ -18,11 +18,11 @@ const TRAILS = { fire: [[1, 0.75, 0.3], [0.8, 0.1, 0]], electric: [[0.75, 0.95, 
 
 const SENS = 0.0022;
 const FLY_SPEED = 30, FLY_BOOST = 90;
-const RUN_SPEED = 13, SUPER_SPEED = 80;
+const RUN_SPEED = 13, SUPER_SPEED = FLY_BOOST * 1.3; // super speed tops flight by 30%
 const GRAVITY = 34;
 const BLOCK_MOVE = 0.3; // movement speed multiplier while blocking
 const BREAKOUT_CD = 6;
-// Dodge: hold Left Ctrl and tap a direction. Short burst with invulnerability, then a cooldown.
+// Dodge: while blocking (hold Left Ctrl), tap a direction. Short burst with invulnerability, then a cooldown.
 // A tap during the cooldown is buffered briefly so chained dodges don't get dropped.
 const DODGE_TIME = 0.3, DODGE_CD = 0.7, DODGE_BUFFER = 0.25;
 const DODGE_SPEED = { flight: 55, speed: 70 };
@@ -112,6 +112,9 @@ export class Player {
     this.dodgeDir = new THREE.Vector3();
     this.dodgeKind = 'roll';
     this.dodgeSign = 1;
+    this.path = []; // recent positions while sprinting (lightning trail)
+    this.pathT = 0;
+    this.stepT = 0; // foot smoke cadence
     // Combat state
     this.blocking = false;
     this.downT = 0; // knocked down
@@ -268,7 +271,7 @@ export class Player {
     this.lungeT = 0;
     this.atk = null;
     this.vel.y = Math.max(this.vel.y, 6);
-    this.ctx.hud.callout(this.breakoutCd <= 0 ? `${label} · HOLD Q TO BREAK OUT` : label, 'bad');
+    this.ctx.hud.callout(this.breakoutCd <= 0 ? `${label} · HOLD CTRL TO BREAK OUT` : label, 'bad');
   }
 
   breakout() {
@@ -333,7 +336,7 @@ export class Player {
       this.updateDown(dt, inp);
       return;
     }
-    this.blocking = inp.down('KeyQ') && this.dodgeT <= 0;
+    this.blocking = inp.down('ControlLeft') && this.dodgeT <= 0;
     this.handleDodgeInput(dt, inp);
     let lungeEnded = false;
     if (this.lungeT > 0) {
@@ -346,6 +349,15 @@ export class Player {
     this.integrate(dt);
     if (lungeEnded) this.vel.multiplyScalar(0.1);
     this.animate(dt);
+    // Pressing Shift in super speed kicks the lightning in straight away; in flight it's the
+    // boost, which sets off a shock wave.
+    const shift = inp.shift && this.movement === 'speed';
+    if (shift && !this.wasShift) this.speedBurst();
+    this.wasShift = shift;
+    this.sprinting = shift; // lightning keeps going for as long as Shift is held
+    const boost = inp.shift && this.movement === 'flight' && !this.blocking;
+    if (boost && !this.wasBoost) this.boostWave();
+    this.wasBoost = boost;
     this.trails(dt);
     this.updateCamera(dt);
   }
@@ -353,7 +365,7 @@ export class Player {
   updateDown(dt, inp) {
     this.downT -= dt;
     this.blocking = false;
-    if (inp.down('KeyQ') && this.breakoutCd <= 0) {
+    if (inp.down('ControlLeft') && this.breakoutCd <= 0) {
       this.boHeld += dt;
       if (this.boHeld >= 0.12) this.breakout();
     } else this.boHeld = 0;
@@ -374,16 +386,15 @@ export class Player {
     ];
   }
 
-  // While Left Ctrl is held, each direction tap is a dodge. Pressing Ctrl while
-  // already moving dodges in the held direction.
+  // Rolling only comes out of the block: while Left Ctrl (block) is held, each direction
+  // tap is a dodge. Holding a direction when raising the block doesn't roll.
   handleDodgeInput(dt, inp) {
     this.dodgeCd -= dt;
     const buf = this.dodgeBuf;
     buf.t -= dt;
     if (inp.down('ControlLeft')) {
-      let f = (inp.hit('KeyW') ? 1 : 0) - (inp.hit('KeyS') ? 1 : 0);
-      let s = (inp.hit('KeyD') ? 1 : 0) - (inp.hit('KeyA') ? 1 : 0);
-      if (!f && !s && inp.hit('ControlLeft')) [f, s] = this.axes(inp);
+      const f = (inp.hit('KeyW') ? 1 : 0) - (inp.hit('KeyS') ? 1 : 0);
+      const s = (inp.hit('KeyD') ? 1 : 0) - (inp.hit('KeyA') ? 1 : 0);
       if (f || s) {
         buf.f = f;
         buf.s = s;
@@ -650,22 +661,174 @@ export class Player {
         fx.spawn(this.pos.x + (Math.random() - 0.5) * 0.6, this.pos.y + 0.3 + Math.random() * 1.4, this.pos.z + (Math.random() - 0.5) * 0.6,
           0, 0, 0, 0.3, 0.7, 0.1, c0, c1, 0, 0);
       }
-    } else if (this.movement === 'speed' && (hs > 24 || this.wallRun)) {
+    } else if (this.movement === 'speed' && (hs > 24 || this.wallRun || this.sprinting)) {
       const n = Math.ceil(dt * 90);
       for (let i = 0; i < n; i++) {
         fx.spawn(this.pos.x + (Math.random() - 0.5) * 0.8, this.pos.y + 0.2 + Math.random() * 1.7, this.pos.z + (Math.random() - 0.5) * 0.8,
           (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, 0.35, 0.5, 0.1, c0, c1, 0, 1);
       }
-      if (this.theme === 'electric' && Math.random() < dt * 12) {
-        const a = _v.set(this.pos.x + (Math.random() - 0.5) * 1.5, this.pos.y + Math.random() * 2, this.pos.z + (Math.random() - 0.5) * 1.5);
-        const b = _v2.set(a.x + (Math.random() - 0.5) * 2, a.y + (Math.random() - 0.5) * 2, a.z + (Math.random() - 0.5) * 2);
-        fx.bolt(a, b, { width: 0.12, life: 0.06 });
+      this.speedLightning(dt, hs);
+    } else if (this.movement === 'flight' && this.speed > 20) this.flightTrail(dt);
+    const sprint = this.movement === 'speed' && (hs > 24 || this.wallRun || this.sprinting);
+    if (!sprint && !(this.movement === 'flight' && this.speed > 20)) this.path.length = 0;
+    this.footSmoke(dt, hs);
+  }
+
+  // Speedster lightning: arcs crackling over the body and bolts snaking along the path behind.
+  speedLightning(dt, hs) {
+    const fx = this.ctx.fx, color = this.look.glow, k = Math.max(this.sprinting ? 0.5 : 0, Math.min(1, hs / SUPER_SPEED));
+    this.pathT -= dt;
+    if (this.pathT <= 0) {
+      this.pathT = 0.025;
+      this.path.unshift(this.pos.clone().setY(this.pos.y + 0.4 + Math.random() * 1.2));
+      if (this.path.length > 14) this.path.pop();
+    }
+    // Arcs jumping between points on the body
+    if (Math.random() < dt * (10 + 30 * k)) {
+      const a = _v.set(this.pos.x + (Math.random() - 0.5) * 1.2, this.pos.y + 0.2 + Math.random() * 1.7, this.pos.z + (Math.random() - 0.5) * 1.2);
+      const b = _v2.set(a.x + (Math.random() - 0.5) * 1.8, a.y + (Math.random() - 0.5) * 1.8, a.z + (Math.random() - 0.5) * 1.8);
+      fx.bolt(a, b, { color, width: 0.1, life: 0.05, jag: 0.3 });
+    }
+    // Bolts running along the trail
+    if (this.path.length > 4 && Math.random() < dt * (6 + 22 * k)) {
+      const i = (Math.random() * (this.path.length - 4)) | 0, j = Math.min(this.path.length - 1, i + 3 + ((Math.random() * 4) | 0));
+      fx.bolt(this.path[i], this.path[j], { color, width: 0.14 + 0.1 * k, life: 0.08, jag: 0.25 });
+    }
+    // Bolts leaping ahead of the runner (about a third as many as behind)
+    if (Math.random() < dt * (2 + 8 * k)) {
+      _v3.set(this.vel.x, 0, this.vel.z);
+      if (_v3.lengthSq() < 1) _v3.set(-Math.sin(this.facing), 0, -Math.cos(this.facing));
+      _v3.normalize();
+      const a = _v.copy(this.pos).setY(this.pos.y + 0.6 + Math.random() * 1.1);
+      const reach = 2 + Math.random() * (3 + 6 * k);
+      const b = _v2.copy(a).addScaledVector(_v3, reach);
+      b.x += (Math.random() - 0.5) * reach * 0.6;
+      b.y += (Math.random() - 0.5) * 1.5;
+      b.z += (Math.random() - 0.5) * reach * 0.6;
+      fx.bolt(a, b, { color, width: 0.1 + 0.08 * k, life: 0.06, jag: 0.3 });
+    }
+    // Now and then a big crack with a flash
+    if (k > 0.8 && Math.random() < dt * 2.5) {
+      _v.copy(this.pos).setY(this.pos.y + 1);
+      fx.bolt(_v, _v2.copy(this.path[this.path.length - 1] ?? _v), { color, width: 0.35, life: 0.12, jag: 0.2 });
+      fx.flash(_v, color, 6, 18, 0.12);
+    }
+  }
+
+  // Flight trail in the power's style: a lightning streak for electricity, a flame jet for fire.
+  flightTrail(dt) {
+    const fx = this.ctx.fx, color = this.look.glow, [c0, c1] = this.trailColors();
+    const k = Math.min(1, this.speed / FLY_BOOST);
+    const at = _v.copy(this.pos).setY(this.pos.y + 1);
+    this.pathT -= dt;
+    if (this.pathT <= 0) {
+      this.pathT = 0.03;
+      this.path.unshift(at.clone());
+      if (this.path.length > 16) this.path.pop();
+    }
+    if (this.theme === 'electric') {
+      // Glowing core streak plus bolts zig-zagging along the flight path
+      const n = Math.ceil(dt * 60);
+      for (let i = 0; i < n; i++) {
+        fx.spawn(at.x + (Math.random() - 0.5) * 0.4, at.y + (Math.random() - 0.5) * 0.4, at.z + (Math.random() - 0.5) * 0.4,
+          0, 0, 0, 0.45, 0.45, 0.05, c0, c1, 0, 0);
       }
-    } else if (this.movement === 'flight' && this.speed > 35) {
-      const sy = Math.sin(this.facing), cy = Math.cos(this.facing);
-      for (const side of [-0.25, 0.25]) {
-        fx.spawn(this.pos.x + cy * side, this.pos.y + 1, this.pos.z - sy * side, 0, 0, 0, 0.5, 0.35, 0.05, c0, c1, 0, 0);
+      if (this.path.length > 3 && Math.random() < dt * (8 + 26 * k)) {
+        const i = (Math.random() * (this.path.length - 3)) | 0, j = Math.min(this.path.length - 1, i + 2 + ((Math.random() * 5) | 0));
+        fx.bolt(this.path[i], this.path[j], { color, width: 0.14 + 0.14 * k, life: 0.09, jag: 0.25 });
       }
+      if (Math.random() < dt * 12) {
+        _v2.set(at.x + (Math.random() - 0.5) * 2, at.y + (Math.random() - 0.5) * 2, at.z + (Math.random() - 0.5) * 2);
+        fx.bolt(at, _v2, { color, width: 0.08, life: 0.05, jag: 0.35 });
+      }
+    } else {
+      // Flames pouring off the body and trailing back, with smoke behind them
+      const n = Math.ceil(dt * (50 + 90 * k));
+      for (let i = 0; i < n; i++) {
+        const t = Math.random();
+        fx.spawn(at.x + (Math.random() - 0.5) * 0.7, at.y + (Math.random() - 0.5) * 0.7, at.z + (Math.random() - 0.5) * 0.7,
+          -this.vel.x * 0.15 * t + (Math.random() - 0.5) * 2, 1 + Math.random() * 2, -this.vel.z * 0.15 * t + (Math.random() - 0.5) * 2,
+          0.35 + 0.35 * k, 0.7 + 0.5 * k, 0.15, [1, 0.85, 0.45], [0.9, 0.18, 0.02], 2, 1.5);
+      }
+      if (Math.random() < dt * (6 + 14 * k)) {
+        const p = this.path[this.path.length - 1] ?? at;
+        fx.smoke(p.x, p.y, p.z, (Math.random() - 0.5) * 1.5, 0.8, (Math.random() - 0.5) * 1.5, 1.4, 0.6, 2.2,
+          [0.25, 0.22, 0.2], [0.12, 0.11, 0.1], 1.2, 0.8);
+      }
+    }
+  }
+
+  // Flight boost: a shock wave around the hero in the power's style.
+  boostWave() {
+    const fx = this.ctx.fx, color = this.look.glow;
+    const c = _v.copy(this.pos).setY(this.pos.y + 1);
+    // Wave plane faces the flight direction (or the camera's when hovering)
+    _v3.set(this.vel.x, this.vel.y, this.vel.z);
+    if (_v3.lengthSq() < 4) _v3.set(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
+    _v3.normalize();
+    const u = new THREE.Vector3(0, 1, 0);
+    if (Math.abs(_v3.y) > 0.9) u.set(1, 0, 0);
+    u.cross(_v3).normalize();
+    const w = new THREE.Vector3().crossVectors(_v3, u);
+    const dir = new THREE.Vector3();
+    const electric = this.theme === 'electric';
+    // Ring of particles blasting outward in that plane
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * Math.PI * 2;
+      dir.copy(u).multiplyScalar(Math.cos(a)).addScaledVector(w, Math.sin(a));
+      const sp = 22 + Math.random() * 8;
+      if (electric) fx.spawn(c.x, c.y, c.z, dir.x * sp, dir.y * sp, dir.z * sp, 0.35, 0.7, 0.1, [1, 1, 1], TRAILS.electric[1], 0, 2.5);
+      else fx.spawn(c.x, c.y, c.z, dir.x * sp, dir.y * sp, dir.z * sp, 0.5, 1.4, 0.3, [1, 0.8, 0.35], [0.85, 0.15, 0], 1, 2.5);
+    }
+    if (electric) {
+      // Bolts lashing outward around the ring
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8 + Math.random() * 0.1) * Math.PI * 2;
+        dir.copy(u).multiplyScalar(Math.cos(a)).addScaledVector(w, Math.sin(a));
+        fx.bolt(c, _v2.copy(c).addScaledVector(dir, 5 + Math.random() * 3), { color, width: 0.25, life: 0.18, jag: 0.25 });
+      }
+    } else {
+      // Fireball puff and smoke left hanging where the boost started
+      fx.burst(c, 30, { speed: 8, life: 0.5, size: 1.6, size1: 0.4, c0: [1, 0.85, 0.4], c1: [0.9, 0.2, 0], ay: 2, drag: 2 });
+      for (let i = 0; i < 10; i++) {
+        fx.smoke(c.x, c.y, c.z, (Math.random() - 0.5) * 6, Math.random() * 2, (Math.random() - 0.5) * 6, 1.6, 1, 3,
+          [0.28, 0.25, 0.22], [0.12, 0.11, 0.1], 1, 1.2);
+      }
+    }
+    fx.flash(c, color, 12, 30, 0.25);
+    fx.ring(this.pos, color, 9, 0.35);
+    this.shake(0.15, 0.25);
+  }
+
+  // Shift pressed: a burst of bolts lashing out from the body, a flash and a shock ring.
+  speedBurst() {
+    const fx = this.ctx.fx, color = this.look.glow;
+    const c = _v.copy(this.pos).setY(this.pos.y + 1);
+    for (let i = 0; i < 7; i++) {
+      const a = Math.random() * Math.PI * 2, r = 2.5 + Math.random() * 3.5;
+      _v2.set(c.x + Math.cos(a) * r, c.y + (Math.random() - 0.4) * 2.5, c.z + Math.sin(a) * r);
+      fx.bolt(c, _v2, { color, width: 0.18, life: 0.16, jag: 0.3 });
+    }
+    fx.flash(c, color, 10, 22, 0.2);
+    fx.ring(this.pos, color, 5, 0.3);
+    fx.burst(c, 24, { speed: 9, life: 0.35, size: 0.35, c0: [1, 1, 1], c1: new THREE.Color(color).toArray(), drag: 3 });
+  }
+
+  // Little puffs of dust kicked up from the feet when running on the ground.
+  footSmoke(dt, hs) {
+    if (this.movement !== 'speed' || !this.grounded || this.wallRun || hs < 6 || this.downT > 0) return;
+    this.stepT -= dt;
+    if (this.stepT > 0) return;
+    const fast = hs > 24;
+    this.stepT = fast ? 0.02 : 0.11;
+    const sy = Math.sin(this.facing), cy = Math.cos(this.facing);
+    const back = Math.min(1, hs / SUPER_SPEED);
+    for (const side of fast ? [-0.18, 0.18] : [Math.random() < 0.5 ? -0.18 : 0.18]) {
+      const x = this.pos.x + cy * side + (Math.random() - 0.5) * 0.3, z = this.pos.z - sy * side + (Math.random() - 0.5) * 0.3;
+      // drifts backwards, opposite to the run, and rises a little
+      const vx = -this.vel.x * 0.08 + (Math.random() - 0.5) * 1.5, vz = -this.vel.z * 0.08 + (Math.random() - 0.5) * 1.5;
+      this.ctx.fx.smoke(x, this.pos.y + 0.1, z, vx, 0.6 + Math.random() * 0.8, vz,
+        0.6 + back * 0.8, 0.25, 0.9 + back * 1.4, [0.62, 0.6, 0.57], [0.42, 0.41, 0.4], 0.6, 1.6);
     }
   }
 

@@ -9,7 +9,7 @@ npm start        # http://localhost:5173
 Open `http://localhost:5173/?debug` to expose `window.game` (and `game.step(n)` to advance frames) for testing.
 
 ## Combat (modeled on DCUO's action combat)
-- LMB tap/hold = strike / lunging Interrupt · RMB tap/hold = blast / Block Breaker · hold Q = Block
+- LMB tap/hold = strike / lunging Interrupt · RMB tap/hold = blast / Block Breaker · hold L-Ctrl = Block (+ direction = dodge)
 - Counter triangle: Block Breaker beats Block, Interrupt beats Block Breaker, Block beats Interrupt
 - Enemy tells: red glow = lunge (block it), orange glow = breaker (interrupt it), blue shield = blocking (break it)
 - Combos: tap×3, tap-tap-hold, ranged tap-tap-hold, tap-tap-ranged hold · hit counter boosts power regen

@@ -21,6 +21,8 @@ export class HUD {
     this.comboEl = $('combo');
     this.hitsEl = $('hits');
     this.nameEl = $('heroName');
+    this.bossEl = $('boss');
+    this.bossHp = $('bossHp');
     this.map = $('minimap').getContext('2d');
     this.city = city;
     this.nums = [];
@@ -48,8 +50,8 @@ export class HUD {
 
   setMode(movement) {
     this.mode.textContent = movement === 'flight'
-      ? 'FLIGHT · Space/C up/down · Shift boost · hold L-Ctrl + direction to dodge'
-      : 'SUPER SPEED · Shift sprint · sprint into walls to wall-run · Space double jump · hold L-Ctrl + direction to dodge';
+      ? 'FLIGHT · Space/C up/down · Shift boost · block (L-Ctrl) + direction to dodge'
+      : 'SUPER SPEED · Shift sprint · sprint into walls to wall-run · Space double jump · block (L-Ctrl) + direction to dodge';
   }
 
   setScore(n) {
@@ -114,6 +116,10 @@ export class HUD {
       s.el.classList.toggle('ready', !!a.ult && p.super >= 100);
     }
     this.speed.textContent = `${Math.round(p.speed * 3.6)} km/h · altitude ${Math.round(p.pos.y)} m`;
+    // Boss health bar while a kaiju is around
+    const boss = ctx.enemies.list.find((e) => e.boss && !e.dead);
+    this.bossEl.classList.toggle('hidden', !boss);
+    if (boss) this.bossHp.style.width = `${Math.max(0, boss.hp / boss.maxHp) * 100}%`;
 
     this.zoneT -= dt;
     if (this.zoneT <= 0) {
@@ -169,8 +175,8 @@ export class HUD {
     c.drawImage(this.city.minimap, -(p.pos.x - info.minX) * k, -(p.pos.z - info.minZ) * k, info.w * sc, info.h * sc);
     for (const e of enemies.list) {
       if (e.dead) continue;
-      const s = e.type === 'brute' ? 9 : 5;
-      c.fillStyle = e.type === 'drone' ? '#ff6ad5' : e.type === 'brute' ? '#c86bff' : '#ff3b30';
+      const s = e.boss ? 16 : e.type === 'brute' ? 9 : 5;
+      c.fillStyle = e.boss ? '#ff8a00' : e.type === 'drone' ? '#ff6ad5' : e.type === 'brute' ? '#c86bff' : '#ff3b30';
       c.fillRect((e.pos.x - p.pos.x) * k - s / 2, (e.pos.z - p.pos.z) * k - s / 2, s, s);
     }
     c.restore();

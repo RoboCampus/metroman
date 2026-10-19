@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { clamp, lerpAngle } from './util.js';
 import { stride } from './humanoid.js';
 import { createRig } from './models.js';
+import { KAIJU_STATS } from './kaiju.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -14,7 +15,7 @@ const MAX_THUGS = 16, MAX_DRONES = 5, MAX_BRUTES = 2, DESPAWN = 380;
 const RED = 0xff2a2a, ORANGE = 0xff8a00, WHITE = 0xffffff;
 
 // Telegraphed specials follow the counter triangle:
-//   'hay' (red glow)    = lunging Interrupt-type attack  -> BLOCK it (Q) to counter
+//   'hay' (red glow)    = lunging Interrupt-type attack  -> BLOCK it (L-Ctrl) to counter
 //   'bb'  (orange glow) = Block Breaker attack           -> hit it with a melee HOLD (Interrupt)
 //   blocking (blue shield)                              -> break it with a ranged HOLD (Block Breaker)
 const STATS = {
@@ -29,6 +30,7 @@ const STATS = {
     bbRange: 9, bbWind: 1.1, bbDmg: 35, slam: 8, down: 1.8, mass: 0.35, scale: 1.6,
   },
   drone: { hp: 80, r: 0.9, cy: 0, mass: 0.8 },
+  kaiju: KAIJU_STATS,
 };
 
 const geo = {
@@ -153,6 +155,15 @@ export class Enemies {
     return out;
   }
 
+  // Distance from p to an enemy: to its centre, or for the kaiju to the surface of its nearest
+  // body part (it's far too big for a single point).
+  reach(e, p) {
+    if (!e.spheres) return this.center(e, _t).distanceTo(p);
+    let best = Infinity;
+    for (const s of e.spheres) best = Math.min(best, s.c.distanceTo(p) - s.r);
+    return Math.max(0, best);
+  }
+
   remove(i) {
     const e = this.list[i];
     this.ctx.scene.remove(e.group);
@@ -165,6 +176,7 @@ export class Enemies {
     let thugs = 0, drones = 0, brutes = 0;
     for (let i = this.list.length - 1; i >= 0; i--) {
       const e = this.list[i];
+      if (e.boss) continue; // the kaiju has its own spawner
       if (Math.hypot(e.pos.x - p.x, e.pos.z - p.z) > DESPAWN) {
         this.remove(i);
         continue;
@@ -197,22 +209,29 @@ export class Enemies {
     const fx = this.ctx.fx;
     for (let i = this.list.length - 1; i >= 0; i--) {
       const e = this.list[i];
-      if (e.dead) {
+      if (e.boss) {
+        if (e.dead) {
+          if (e.boss.updateDead(dt)) this.remove(i);
+          continue;
+        }
+        e.boss.update(dt);
+      } else if (e.dead) {
         if (this.updateDead(e, dt)) this.remove(i);
         continue;
-      }
-      if (e.type === 'drone') this.updateDrone(e, dt);
+      } else if (e.type === 'drone') this.updateDrone(e, dt);
       else this.updateThug(e, dt);
       if (e.dead) continue;
 
-      e.flash = Math.max(0, e.flash - dt * 6);
+      if (!e.boss) e.flash = Math.max(0, e.flash - dt * 6);
       let col = WHITE, inten = e.flash * 0.9;
       if (e.windup) {
         col = e.windup.kind === 'hay' ? RED : ORANGE;
         inten = Math.max(inten, 0.6 + 0.4 * Math.sin(e.windup.t * 25));
       }
-      e.mat.emissive.setHex(col);
-      e.mat.emissiveIntensity = inten;
+      if (!e.boss) {
+        e.mat.emissive.setHex(col);
+        e.mat.emissiveIntensity = inten;
+      }
 
       this.center(e, _v);
       if (e.stun > 0) {
@@ -606,22 +625,27 @@ export class Enemies {
   kill(e) {
     e.dead = true;
     e.deathT = 2;
+    if (e.boss) {
+      this.flushDamage(e);
+      e.mat.emissiveIntensity = 0;
+    }
     e.spin = (Math.random() - 0.5) * 14;
     e.vel.y += 6;
     e.mat.emissiveIntensity = 0;
     if (e.shield) e.shield.visible = e.icon.visible = false;
     this.flushDamage(e);
-    this.score += e.type === 'brute' ? 5 : 1;
+    this.score += e.boss ? 25 : e.type === 'brute' ? 5 : 1;
     this.ctx.hud.setScore(this.score);
     this.ctx.player.addSuper(e.type === 'brute' ? 20 : 4);
+    if (e.boss) return;
   }
 
   damageRadius(c, r, amt, knock, stun, opts = {}) {
     for (const e of this.list) {
-      if (e.dead) continue;
+      if (e.dead || e === opts.skip || (e.boss && opts.noBoss)) continue;
       this.center(e, _v);
-      const d = _v.distanceTo(c);
-      if (d > r + e.r) continue;
+      const d = e.spheres ? this.reach(e, c) : _v.distanceTo(c);
+      if (d > r + (e.spheres ? 0 : e.r)) continue;
       const f = 1 - 0.5 * Math.min(1, d / r);
       _w.subVectors(_v, c);
       _w.y = Math.max(_w.y, 0);
@@ -629,7 +653,7 @@ export class Enemies {
       _w.normalize();
       _w.y += 0.6;
       _w.normalize().multiplyScalar(knock * f);
-      this.damage(e, amt * f, { ...opts, knock: _w.clone(), stun }); // clone: counter() reuses _w
+      this.damage(e, amt * f, { ...opts, skip: undefined, noBoss: undefined, knock: _w.clone(), stun }); // clone: counter() reuses _w
     }
     this.ctx.traffic?.damageRadius(c, r, amt, knock); // area attacks also wreck cars
     if (knock > 3) this.ctx.props?.damageRadius(c, r, knock); // ...and smash trees, benches, hydrants
@@ -640,17 +664,19 @@ export class Enemies {
     let best = null, bt = len;
     for (const e of this.list) {
       if (e.dead) continue;
-      this.center(e, _v);
-      _w.subVectors(_v, o);
-      const tc = _w.dot(d), R = e.r + rad;
-      const d2 = _w.lengthSq() - tc * tc;
-      if (d2 > R * R) continue;
-      const th = Math.sqrt(R * R - d2);
-      let t = tc - th;
-      if (t < 0) t = tc + th < 0 ? -1 : 0;
-      if (t < 0 || t > bt) continue;
-      bt = t;
-      best = e;
+      const parts = e.spheres || [{ c: this.center(e, _u), r: e.r }];
+      for (const s of parts) {
+        _w.subVectors(s.c, o);
+        const tc = _w.dot(d), R = s.r + rad;
+        const d2 = _w.lengthSq() - tc * tc;
+        if (d2 > R * R) continue;
+        const th = Math.sqrt(R * R - d2);
+        let t = tc - th;
+        if (t < 0) t = tc + th < 0 ? -1 : 0;
+        if (t < 0 || t > bt) continue;
+        bt = t;
+        best = e;
+      }
     }
     return best ? { enemy: best, t: bt } : null;
   }
@@ -680,9 +706,9 @@ export class Enemies {
     for (const e of this.list) {
       if (e.dead) continue;
       _w.subVectors(this.center(e, _v), o);
-      const dist = _w.length();
-      if (dist > bd || dist < 0.01) continue;
-      if (_w.dot(d) / dist < cosA && dist > 2) continue;
+      const dist = e.spheres ? this.reach(e, o) : _w.length();
+      if (dist > bd || (!e.spheres && dist < 0.01)) continue;
+      if (!e.spheres && _w.dot(d) / dist < cosA && dist > 2) continue;
       bd = dist;
       best = e;
     }
@@ -693,7 +719,7 @@ export class Enemies {
     let best = null, bd = r;
     for (const e of this.list) {
       if (e.dead || exclude.includes(e)) continue;
-      const d = this.center(e, _v).distanceTo(p);
+      const d = this.reach(e, p);
       if (d < bd) {
         bd = d;
         best = e;
@@ -703,7 +729,7 @@ export class Enemies {
   }
 
   inRadius(p, r) {
-    return this.list.filter((e) => !e.dead && this.center(e, _v).distanceTo(p) < r + e.r);
+    return this.list.filter((e) => !e.dead && this.reach(e, p) < r + (e.spheres ? 0 : e.r));
   }
 
   cone(o, d, range, cosA, fn) {

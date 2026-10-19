@@ -10,6 +10,7 @@ import { Combat } from './combat.js';
 import { loadModels } from './models.js';
 import { Impacts } from './impacts.js';
 import { Destruction } from './destruction.js';
+import { KaijuSpawner } from './kaiju.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -136,6 +137,7 @@ city.props.bind(ctx);
 const blobs = new BlobShadows(scene);
 ctx.impacts = new Impacts(ctx); // craters, scorch marks, shattered windows
 ctx.destruction = new Destruction(ctx, city.destructible); // breakable buildings
+ctx.kaiju = new KaijuSpawner(ctx); // building-sized boss (K summons it)
 const { player, enemies, combat } = ctx;
 let powers = null;
 ctx.getPowers = () => powers;
@@ -333,6 +335,10 @@ function updateBlobShadows() {
     blobs.add(player.pos.x, gy, player.pos.z, 0.7, player.pos.y - gy);
   }
   for (const e of enemies.list) {
+    if (e.boss) {
+      if (!e.dead) blobs.add(e.pos.x, 0.05, e.pos.z, e.stats.r * 1.8, e.pos.y, 0.6);
+      continue;
+    }
     if (e.dead && e.deathT < 0.5) continue;
     const drone = e.type === 'drone', top = e.pos.y + (drone ? -0.3 : 0.5);
     const gy = w.groundY(e.pos.x, e.pos.z, top);
@@ -354,6 +360,7 @@ function tick(dt) {
   combat.update(dt);
   player.update(dt);
   powers.update(dt);
+  ctx.kaiju.update(dt, input);
   enemies.update(dt);
   city.update(dt, elapsed, player.pos);
   ctx.impacts.update(dt);
