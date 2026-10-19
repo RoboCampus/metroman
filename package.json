@@ -1,0 +1,10 @@
+{
+  "name": "metro-guardian",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser superhero action game set in New York",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
