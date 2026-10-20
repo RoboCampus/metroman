@@ -4,6 +4,7 @@ import { stride } from './humanoid.js';
 import { createRig } from './models.js';
 import { KAIJU_STATS } from './kaiju.js';
 import { IMPREGNO_STATS } from './impregno.js';
+import { ALIEN_STATS } from './alien.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -33,6 +34,7 @@ const STATS = {
   drone: { hp: 80, r: 0.9, cy: 0, mass: 0.8 },
   kaiju: KAIJU_STATS,
   impregno: IMPREGNO_STATS,
+  alien: ALIEN_STATS,
 };
 
 const geo = {
@@ -640,7 +642,7 @@ export class Enemies {
     if (e.shield) e.shield.visible = e.icon.visible = false;
     this.flushDamage(e);
     if (e.lastNoCredit) return; // killed by another boss
-    this.score += e.boss ? 25 : e.type === 'brute' ? 5 : 1;
+    this.score += e.scoreValue ?? (e.boss ? 25 : e.type === 'brute' ? 5 : 1);
     this.ctx.hud.setScore(this.score);
     this.ctx.player.addSuper(e.type === 'brute' ? 20 : 4);
     if (e.boss) return;

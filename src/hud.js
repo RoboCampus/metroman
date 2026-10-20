@@ -117,7 +117,7 @@ export class HUD {
     }
     this.speed.textContent = `${Math.round(p.speed * 3.6)} km/h · altitude ${Math.round(p.pos.y)} m`;
     // A health bar per boss on the scene
-    const bosses = ctx.enemies.list.filter((e) => e.boss && !e.dead);
+    const bosses = ctx.enemies.list.filter((e) => e.boss && !e.noBar && !e.dead);
     this.bossEl.classList.toggle('hidden', !bosses.length);
     while (this.bossRows.length < bosses.length) {
       const row = document.createElement('div');

@@ -12,7 +12,7 @@ import { Impacts } from './impacts.js';
 import { Destruction } from './destruction.js';
 import { KaijuSpawner } from './kaiju.js';
 import { ImpregnoSpawner } from './impregno.js';
-import { BossFight } from './bossfight.js';
+import { AlienSpawner } from './alien.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -141,8 +141,10 @@ ctx.impacts = new Impacts(ctx); // craters, scorch marks, shattered windows
 ctx.destruction = new Destruction(ctx, city.destructible); // breakable buildings
 ctx.kaiju = new KaijuSpawner(ctx); // building-sized boss (K summons it)
 ctx.impregno = new ImpregnoSpawner(ctx); // flying mayo boss (I summons him)
-ctx.bossFight = new BossFight(ctx, ctx.kaiju, ctx.impregno); // kaiju vs Impregno Man (B starts a battle)
-ctx.kaiju.timer = ctx.impregno.timer = Infinity; // the first appearance is the boss battle
+// Both boss fights are temporarily disabled (no spawns, K / I do nothing). To bring them back,
+// delete this line; for the kaiju vs Impregno Man battle see bossfight.js.
+ctx.kaiju.enabled = ctx.impregno.enabled = false;
+ctx.aliens = new AlienSpawner(ctx, city.destructible.groups); // alien spheres break out of buildings (U summons one)
 const { player, enemies, combat } = ctx;
 let powers = null;
 ctx.getPowers = () => powers;
@@ -369,7 +371,7 @@ function tick(dt) {
   powers.update(dt);
   ctx.kaiju.update(dt, input);
   ctx.impregno.update(dt, input);
-  ctx.bossFight.update(dt, input);
+  ctx.aliens.update(dt, input);
   enemies.update(dt);
   city.update(dt, elapsed, player.pos);
   ctx.impacts.update(dt);

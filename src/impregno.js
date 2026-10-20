@@ -931,6 +931,7 @@ export class ImpregnoSpawner {
     this.ctx.mayo.update(dt);
     this.ctx.mayoCoat.update(dt);
     this.ctx.mayoFloods = this.ctx.mayoFloods.filter((f) => f.update(dt));
+    if (this.enabled === false && !this.current) return; // switched off (main.js)
     if (this.current && !this.ctx.enemies.list.includes(this.current.e)) {
       this.current.dispose();
       this.current = null;
