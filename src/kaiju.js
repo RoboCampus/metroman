@@ -7,8 +7,10 @@ import { clamp, lerpAngle } from './util.js';
 //   - Stomps when the hero is close to the ground below it.
 //   - Leaps across the city at the hero and lands with a huge shock wave.
 //   - Charges at the hero for a few seconds, head down, snapping its jaws to bite.
+//   - Turns its back on the hero, lifts its tail and fires a salvo of giant chocolate balls at them.
 // It lives in enemies.list (type 'kaiju') so every attack the hero has can damage it; its body is
 // a set of hit spheres (torso, neck, head, hips) instead of the single sphere smaller enemies use.
+// When another boss is around (this.rival, see bossfight.js) it fights that boss instead of the hero.
 
 // The model is built at 1/SCALE size (about 36 m to the horn tips) and scaled up to skyscraper
 // height; distances below are in world metres.
@@ -18,7 +20,9 @@ const WALK = 34; // m/s
 const TURN = 1.0; // rad/s
 const KEEP = 150; // preferred distance to the hero
 const STRIDE = 16 * SCALE; // metres per gait cycle
-const FIREBALL = { speed: 115, radius: 4.5, dmg: 48, blast: 14 };
+const FIREBALL = { speed: 165, radius: 4.5, dmg: 48, blast: 14 };
+const CHOCO = { min: 120, max: 700, wind: 0.8, count: 4, every: 0.25, radius: 5, gravity: 30, dmg: 35, splash: 10 };
+const chocoMat = new THREE.MeshStandardMaterial({ color: '#3b2112', roughness: 0.28, metalness: 0.1 });
 const LEAP = { min: 170, max: 650, crouch: 0.7 }; // jump-attack range and wind-up
 const RUSH = { min: 90, max: 550, wind: 0.7, time: 5, speed: 68, turn: 1.7, dmg: 60, reach: 30 }; // charge & bite
 const SPAWN_FIRST = 25, RESPAWN = 90;
@@ -47,6 +51,8 @@ function lump(rx, ry, rz, seg = 10, jitter = 0.08) {
   g.computeVertexNormals();
   return g;
 }
+let chocoGeo = null; // lumpy chocolate ball (made on first use)
+
 // Tapered limb segment hanging down from its pivot
 function limb(r0, r1, len) {
   return new THREE.CylinderGeometry(r0, r1, len, 9, 2).translate(0, -len / 2, 0);
@@ -86,6 +92,8 @@ export class Kaiju {
     this.tilt = 0;
     this.shots = 0;
     this.fireballs = [];
+    this.choco = []; // chocolate balls in the air
+    this.tailLift = 0;
     this.crouch = 0;
     this.airY = 0;
     this.leap = null;
@@ -207,18 +215,44 @@ export class Kaiju {
     }
   }
 
+  // Who it's attacking: its rival boss while one is alive, otherwise the hero. Rival bosses are
+  // wrapped to look like the hero (pos, vel, dead, takeDamage) plus hitR, the size of their body.
+  target() {
+    const r = this.rival;
+    if (r && !r.e.dead && this.ctx.enemies.list.includes(r.e)) return r.asTarget();
+    return this.ctx.player;
+  }
+
+  // This kaiju as another boss's target. pos is 1 m below its chest (the hero's pos is at their
+  // feet and attacks aim 1 m up).
+  asTarget() {
+    const T = (this.asT ??= {
+      pos: new THREE.Vector3(), vel: new THREE.Vector3(), hitR: 10 * SCALE, boss: this, knockdown() {},
+      takeDamage: (a) => {
+        this.ctx.enemies.damage(this.e, a, { type: 'power', noCredit: true });
+        return 'hit';
+      },
+    });
+    T.dead = this.e.dead;
+    T.pos.copy(this.e.spheres[0].c);
+    T.pos.y -= 1;
+    return T;
+  }
+
   update(dt) {
     const e = this.e, { player, world } = this.ctx;
-    _v.subVectors(player.pos, e.pos);
+    const tgt = this.target();
+    _v.subVectors(tgt.pos, e.pos);
     const dist = Math.hypot(_v.x, _v.z);
     const want = Math.atan2(-_v.x, -_v.z);
     e.stun = 0; // too big to stun
     e.vel.set(0, 0, 0);
 
-    let speed = 0;
+    let speed = 0, gait = 0; // gait: legs shuffle without moving (turning on the spot)
+    const away = want + Math.PI; // rear end pointing at the hero
     this.stateT -= dt;
     this.attackCd -= dt;
-    const aware = !player.dead;
+    const aware = !tgt.dead;
     switch (this.state) {
       case 'roar':
         this.jaw = Math.min(1, this.jaw + dt * 2);
@@ -248,10 +282,12 @@ export class Kaiju {
           break;
         }
         if (aware && this.attackCd <= 0 && dist < 750) {
-          if (dist < 34 * SCALE && player.pos.y < 14 * SCALE) this.begin('stomp', 1.0);
+          if (dist < 34 * SCALE && tgt.pos.y < 14 * SCALE) this.begin('stomp', 1.0);
           else if (dist > RUSH.min && dist < RUSH.max && turn < 0.8 && Math.random() < 0.3) {
             this.begin('rushWind', RUSH.wind);
             this.ctx.hud.callout('IT\'S CHARGING!', 'bad');
+          } else if (dist > CHOCO.min && dist < CHOCO.max && Math.random() < 0.3) {
+            this.begin('buttTurn', 3);
           } else if (dist > LEAP.min && dist < LEAP.max && turn < 0.8 && Math.random() < 0.35) {
             this.begin('crouch', LEAP.crouch);
           } else if (turn < 0.6) this.begin('breath', 0.9);
@@ -322,6 +358,39 @@ export class Kaiju {
         }
         break;
       }
+      case 'buttTurn': {
+        // Turn around on the spot until its rear end points at the hero
+        const off = Math.abs(((away - e.facing + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+        if (aware) e.facing = lerpAngle(e.facing, away, Math.min(1, (2.2 * dt) / Math.max(0.01, off)));
+        gait = 14;
+        if (off < 0.12 || this.stateT <= 0) this.begin('buttWind', CHOCO.wind);
+        break;
+      }
+      case 'buttWind':
+        // Tail goes up...
+        if (aware) e.facing = lerpAngle(e.facing, away, Math.min(1, dt * 1.5));
+        this.tailLift = Math.min(1, this.tailLift + dt / CHOCO.wind);
+        if (this.stateT <= 0) {
+          this.begin('butt', 0);
+          this.shots = 0;
+          this.ctx.hud.callout('CHOCOLATE INCOMING!', 'bad');
+        }
+        break;
+      case 'butt':
+        // ...and out they come, one after another
+        if (aware) e.facing = lerpAngle(e.facing, away, Math.min(1, dt * 1.5));
+        if (this.stateT <= 0) {
+          this.launchChoco();
+          this.shots++;
+          this.stateT = CHOCO.every;
+          if (this.shots >= CHOCO.count) {
+            this.shots = 0;
+            this.state = 'recover';
+            this.stateT = 1;
+            this.attackCd = 3 + Math.random() * 2;
+          }
+        }
+        break;
       case 'rushWind':
         // Lowers its head and roars, then goes
         if (aware) e.facing = lerpAngle(e.facing, want, Math.min(1, dt * 2.5));
@@ -353,6 +422,7 @@ export class Kaiju {
     }
     if (this.state !== 'stomp') this.tilt = Math.max(0, this.tilt - dt * 1.4);
     if (this.state !== 'rushWind' && this.state !== 'rush') this.lunge = Math.max(0, this.lunge - dt * 1.5);
+    if (this.state !== 'buttWind' && this.state !== 'butt') this.tailLift = Math.max(0, this.tailLift - dt * 1.2);
     if (this.state !== 'crouch' && this.state !== 'leap') this.crouch = Math.max(0, this.crouch - dt * 2);
 
     // Move and animate
@@ -361,7 +431,7 @@ export class Kaiju {
     e.pos.y = this.airY;
     this.root.position.copy(e.pos);
     this.root.rotation.y = e.facing;
-    this.animate(dt, speed);
+    this.animate(dt, Math.max(speed, gait));
     this.updateSpheres();
     if (speed > 0 || this.state === 'stomp' || this.state === 'leap') this.smash(dt);
     this.pushPlayer();
@@ -371,6 +441,7 @@ export class Kaiju {
     e.mat.emissiveIntensity = e.flash * 0.35;
     this.glow.color.copy(this.glowBase).multiplyScalar(1 + this.charge * 1.5 + Math.sin(performance.now() * 0.004) * 0.15);
     this.updateFireballs(dt);
+    this.updateChoco(dt);
   }
 
   // Is the ground `ahead` metres in direction `facing` (centre of the body) land?
@@ -390,9 +461,9 @@ export class Kaiju {
   // Jump at the spot the hero is over, leading them a little. Over the river it lands on the
   // nearest bit of shore on the way to them.
   startLeap() {
-    const { player, city } = this.ctx, e = this.e;
-    const to = new THREE.Vector3(player.pos.x + player.vel.x * 0.8, 0, player.pos.z + player.vel.z * 0.8);
-    if (!city.isLand(to.x, to.z)) to.set(player.pos.x, 0, player.pos.z);
+    const { player, city } = this.ctx, e = this.e, tgt = this.target();
+    const to = new THREE.Vector3(tgt.pos.x + tgt.vel.x * 0.8, 0, tgt.pos.z + tgt.vel.z * 0.8);
+    if (!city.isLand(to.x, to.z)) to.set(tgt.pos.x, 0, tgt.pos.z);
     for (let i = 0; i < 40 && !city.isLand(to.x, to.z); i++) to.lerp(e.pos, 0.08);
     if (!city.isLand(to.x, to.z)) to.copy(e.pos).setY(0);
     const d = Math.hypot(to.x - e.pos.x, to.z - e.pos.z);
@@ -413,17 +484,17 @@ export class Kaiju {
 
   // Snap at the hero if they're in front of its jaws (the bite reaches down below the head).
   tryBite() {
-    const p = this.ctx.player.pos;
+    const tgt = this.target(), p = tgt.pos, hr = tgt.hitR ?? 0;
     this.mouth(_u);
     const hd = Math.hypot(p.x - _u.x, p.z - _u.z), dy = p.y + 1 - _u.y;
-    if (Math.hypot(hd, Math.max(0, dy)) > RUSH.reach + 6 || dy < -RUSH.reach * 2.5) return false;
+    if (Math.hypot(hd, Math.max(0, dy)) > RUSH.reach + 6 + hr || dy < -RUSH.reach * 2.5 - hr) return false;
     this.biteCd = 0.6;
     this.jaw = 0;
     const fx = this.ctx.fx;
     fx.burst(_u, 30, { speed: 16, life: 0.4, size: 2, c0: [1, 0.85, 0.5], c1: [0.8, 0.2, 0], drag: 2 });
     fx.ring(_u, 0xff5020, 18, 0.3);
     this.ctx.player.shake(0.8, 0.4);
-    const r = this.hitPlayer(RUSH.dmg, _u.clone(), 30);
+    const r = tgt === this.ctx.player ? this.hitPlayer(RUSH.dmg, _u.clone(), 30) : tgt.takeDamage(RUSH.dmg);
     if (r === 'ignored') {
       this.ctx.hud.callout('DODGED!', 'good');
       return false; // rolled clear: keep chasing
@@ -473,8 +544,8 @@ export class Kaiju {
     this.body.rotation.x = this.tilt + (lp ? 0.35 * (1 - 2 * Math.min(1, lp.t / lp.T)) : 0) - 0.18 * this.lunge; // nose up, then down
     this.neck.rotation.x = -0.75 * this.lunge; // head down to bite
     this.body.rotation.z = moving ? Math.sin(this.phase * Math.PI * 2) * 0.03 : 0;
-    // Head looks at the hero; rears back while charging
-    const p = this.ctx.player.pos;
+    // Head looks at its target; rears back while charging
+    const p = this.target().pos;
     this.head.getWorldPosition(_v);
     const local = this.root.worldToLocal(_w.copy(p));
     const yaw = clamp(Math.atan2(-local.x, -(local.z + 27)), -0.7, 0.7); // local space is unscaled
@@ -487,8 +558,8 @@ export class Kaiju {
     this.mouthGlow.visible = this.jaw > 0.1 || this.charge > 0;
     const t = performance.now() * 0.001;
     this.tail.forEach((s, i) => {
-      s.rotation.y = Math.sin(t * 1.4 - i * 0.5) * (moving ? 0.12 : 0.06);
-      s.rotation.x = i === 0 ? -0.15 : 0.04;
+      s.rotation.y = Math.sin(t * 1.4 - i * 0.5) * (moving ? 0.12 : 0.06) * (1 - this.tailLift);
+      s.rotation.x = (i === 0 ? -0.15 - 0.75 * this.tailLift : 0.04 - 0.08 * this.tailLift);
     });
   }
 
@@ -507,7 +578,7 @@ export class Kaiju {
     this.ctx.destruction?.damage(_u.clone().setY(4), 10);
     this.ctx.traffic?.damageRadius(_u, R, 400, 18);
     this.ctx.props?.damageRadius(_u, R, 20);
-    this.ctx.enemies.damageRadius(_u, R, 300, 20, 0, { type: 'power', skip: this.e });
+    this.ctx.enemies.damageRadius(_u, R, 300, 20, 0, { type: 'power', skip: this.e, noCredit: true });
     if (d < R && player.pos.y < 4 * SCALE) this.hitPlayer(30, _u, 18);
   }
 
@@ -538,20 +609,36 @@ export class Kaiju {
     return false;
   }
 
-  // The hero can't fly through the beast.
+  // The hero (and a flying rival) can't pass through the beast.
   pushPlayer() {
     const p = this.ctx.player;
+    this.pushOut(p.pos, p.vel);
+    const r = this.rival;
+    if (r && !r.e.dead && r.vel) this.pushOut(r.e.pos, r.vel);
+  }
+
+  pushOut(pos, vel) {
     for (const s of this.e.spheres) {
-      _v.copy(p.pos);
+      _v.copy(pos);
       _v.y += 1;
       _v.sub(s.c);
       const d = _v.length(), R = s.r + 0.6;
       if (d >= R || d < 1e-3) continue;
       _v.multiplyScalar((R - d) / d);
-      p.pos.add(_v);
-      const into = p.vel.dot(_v.normalize());
-      if (into < 0) p.vel.addScaledVector(_v, -into);
+      pos.add(_v);
+      const into = vel.dot(_v.normalize());
+      if (into < 0) vel.addScaledVector(_v, -into);
     }
+  }
+
+  // Does a projectile moving from `from` along unit `dir` for `len` pass within `rad` of the target?
+  // Returns the distance along the path, or -1.
+  nearTarget(tgt, from, dir, len, rad) {
+    if (tgt.dead) return -1;
+    _v.copy(tgt.pos);
+    _v.y += 1;
+    const proj = clamp(_w.subVectors(_v, from).dot(dir), 0, len);
+    return _w.copy(from).addScaledVector(dir, proj).distanceTo(_v) < rad + (tgt.hitR ?? 0) ? proj : -1;
   }
 
   // ---------------------------------------------------------------- attacks
@@ -569,11 +656,11 @@ export class Kaiju {
   }
 
   spit(angle) {
-    const { player, scene, fx } = this.ctx;
+    const { scene, fx } = this.ctx, tgt = this.target();
     const from = this.mouth(new THREE.Vector3());
     // Aim with a little lead so standing still or flying straight gets punished
-    const d = from.distanceTo(player.pos);
-    const to = _w.copy(player.pos).addScaledVector(player.vel, (d / FIREBALL.speed) * 0.6);
+    const d = from.distanceTo(tgt.pos);
+    const to = _w.copy(tgt.pos).addScaledVector(tgt.vel, (d / FIREBALL.speed) * 0.6);
     to.y += 1;
     const dir = to.sub(from).normalize().applyAxisAngle(UP, angle).clone(); // clone: _w is scratch
     const g = new THREE.Group();
@@ -589,7 +676,7 @@ export class Kaiju {
   }
 
   updateFireballs(dt) {
-    const { world, player, fx, scene } = this.ctx;
+    const { world, player, fx, scene } = this.ctx, tgt = this.target();
     for (let i = this.fireballs.length - 1; i >= 0; i--) {
       const f = this.fireballs[i];
       f.life -= dt;
@@ -599,15 +686,14 @@ export class Kaiju {
       let t = world.raycastHit(f.pos, _u, reach);
       let hit = t < reach;
       let normal = hit ? world.hitNormal : null;
-      // Close pass by the hero detonates it
-      _v.copy(player.pos);
-      _v.y += 1;
-      const proj = clamp(_w.subVectors(_v, f.pos).dot(_u), 0, len);
-      const miss = _w.copy(f.pos).addScaledVector(_u, proj).distanceTo(_v);
-      if (!player.dead && miss < FIREBALL.radius + 0.8 && proj < t) {
-        t = proj;
-        hit = true;
-        normal = null;
+      // Close pass by the hero (or the rival boss) detonates it
+      for (const who of tgt === player ? [player] : [player, tgt]) {
+        const proj = this.nearTarget(who, f.pos, _u, len, FIREBALL.radius + 0.8);
+        if (proj >= 0 && proj < t) {
+          t = proj;
+          hit = true;
+          normal = null;
+        }
       }
       if (hit || f.life <= 0 || f.pos.y < world.floorAt(f.pos.x, f.pos.z)) {
         f.pos.addScaledVector(_u, Math.min(t, len));
@@ -645,10 +731,110 @@ export class Kaiju {
     // Craters, shattered windows and a hole knocked through any building it hits
     impacts?.hit(p, normal, 7, 'fire', 10);
     this.ctx.destruction?.damage(normal ? _v.copy(p).addScaledVector(normal, -2) : p, 5.5);
-    enemies.damageRadius(p, B, 120, 16, 0, { type: 'power', skip: this.e });
+    enemies.damageRadius(p, B, 120, 16, 0, { type: 'power', skip: this.e, noCredit: true });
     const d = player.pos.distanceTo(p);
     player.shake(Math.min(1, 0.9 * (1 - d / 150)), 0.5);
     if (d < B) this.hitPlayer(FIREBALL.dmg * (1 - 0.6 * (d / B)), p, 22 * (1 - d / B) + 6);
+  }
+
+  // A chocolate ball lobbed from under the raised tail in a high arc onto (or near) the hero.
+  launchChoco() {
+    const { scene, fx } = this.ctx, player = this.target(); // (aims at the rival boss when fighting one)
+    this.root.updateMatrixWorld(true);
+    const from = this.tail[0].getWorldPosition(new THREE.Vector3());
+    _w.set(-Math.sin(this.e.facing), 0, -Math.cos(this.e.facing));
+    from.addScaledVector(_w, -6 * SCALE); // just behind the haunches, under the raised tail
+    from.y -= 2 * SCALE;
+    const d = Math.hypot(player.pos.x - from.x, player.pos.z - from.z);
+    const T = clamp(d / 150, 1.4, 3.2);
+    // Aim where the hero will be: the first ball dead on, the rest spread to carpet the area
+    const spread = this.shots === 0 ? 0 : 36;
+    const to = new THREE.Vector3(
+      player.pos.x + player.vel.x * T * 0.5 + (Math.random() - 0.5) * spread,
+      Math.max(0, player.pos.y - 1),
+      player.pos.z + player.vel.z * T * 0.5 + (Math.random() - 0.5) * spread,
+    );
+    const g = CHOCO.gravity;
+    const vel = new THREE.Vector3((to.x - from.x) / T, (to.y - from.y) / T + 0.5 * g * T, (to.z - from.z) / T);
+    chocoGeo ??= lump(1, 0.92, 1, 14, 0.12);
+    const m = new THREE.Mesh(chocoGeo, chocoMat);
+    m.scale.setScalar(CHOCO.radius);
+    m.castShadow = true;
+    m.position.copy(from);
+    scene.add(m);
+    this.choco.push({ pos: from, vel, mesh: m, life: T + 3, to, ringT: 0, spin: new THREE.Vector3(Math.random() * 3, Math.random() * 3, 0) });
+    // Rude noise made visible: a brown puff out the back
+    for (let i = 0; i < 16; i++) {
+      fx.smoke(from.x, from.y, from.z, -_w.x * 12 + (Math.random() - 0.5) * 10, (Math.random() - 0.3) * 8, -_w.z * 12 + (Math.random() - 0.5) * 10,
+        1.5 + Math.random(), 4, 12, [0.42, 0.3, 0.18], [0.3, 0.22, 0.14], 0.5, 1.2);
+    }
+    this.ctx.player.shake(0.2, 0.25);
+  }
+
+  updateChoco(dt) {
+    const { world, player, fx, scene } = this.ctx, tgt = this.target();
+    for (let i = this.choco.length - 1; i >= 0; i--) {
+      const b = this.choco[i];
+      b.life -= dt;
+      b.vel.y -= CHOCO.gravity * dt;
+      const len = b.vel.length() * dt;
+      _u.copy(b.vel).normalize();
+      const reach = len + CHOCO.radius * 0.6;
+      let t = world.raycastHit(b.pos, _u, reach);
+      let hit = t < reach;
+      let normal = hit ? world.hitNormal : null;
+      for (const who of tgt === player ? [player] : [player, tgt]) {
+        const proj = this.nearTarget(who, b.pos, _u, len, CHOCO.radius + 0.8);
+        if (proj >= 0 && proj < t) {
+          t = proj;
+          hit = true;
+          normal = null;
+        }
+      }
+      if (hit || b.life <= 0 || b.pos.y < world.floorAt(b.pos.x, b.pos.z)) {
+        b.pos.addScaledVector(_u, Math.min(t, len));
+        this.splat(b.pos, normal);
+        scene.remove(b.mesh);
+        this.choco.splice(i, 1);
+        continue;
+      }
+      b.pos.addScaledVector(_u, len);
+      b.mesh.position.copy(b.pos);
+      b.mesh.rotation.x += b.spin.x * dt;
+      b.mesh.rotation.y += b.spin.y * dt;
+      // Dripping on the way, and a warning ring where it will land
+      if (Math.random() < 0.5) fx.smoke(b.pos.x, b.pos.y - CHOCO.radius * 0.8, b.pos.z, 0, -2, 0, 1.2, 0.8, 0.4, [0.3, 0.17, 0.08], [0.24, 0.13, 0.06], -25, 0.2);
+      b.ringT -= dt;
+      if (b.ringT <= 0) {
+        b.ringT = 0.35;
+        fx.ring(_w.set(b.to.x, b.to.y + 0.3, b.to.z), 0x8a4a1c, CHOCO.splash, 0.3);
+      }
+    }
+  }
+
+  splat(p, normal) {
+    const { fx, player, impacts, enemies } = this.ctx;
+    const R = CHOCO.splash;
+    for (let i = 0; i < 45; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 6 + Math.random() * 16;
+      fx.smoke(p.x, p.y + 1, p.z, Math.cos(a) * sp, 4 + Math.random() * 10, Math.sin(a) * sp, 1.4 + Math.random(), 1.6, 0.8,
+        [0.33, 0.19, 0.09], [0.24, 0.13, 0.06], -26, 0.6);
+    }
+    for (let i = 0; i < 8; i++) {
+      fx.smoke(p.x + (Math.random() - 0.5) * R, p.y + 1, p.z + (Math.random() - 0.5) * R, 0, 1.5, 0, 2, 3, 7, [0.45, 0.34, 0.22], [0.32, 0.25, 0.18], 0.6, 1);
+    }
+    // A big brown splat on whatever it hit
+    const n = normal || UP;
+    const gy = normal ? p.y : this.ctx.world.groundY(p.x, p.z, p.y + 1);
+    if (normal || p.y - gy < 4) impacts?.decals.add('splat', _w.set(p.x, normal ? p.y : gy, p.z), n, R * 2.4, 20);
+    if (normal && Math.abs(normal.y) < 0.5) this.ctx.destruction?.damage(_v.copy(p).addScaledVector(normal, -1.5), 3.5);
+    enemies.damageRadius(p, R, 60, 12, 0, { type: 'power', skip: this.e, noCredit: true });
+    const d = player.pos.distanceTo(p);
+    player.shake(Math.min(0.6, 0.6 * (1 - d / 120)), 0.35);
+    if (d < R) {
+      const r = this.hitPlayer(CHOCO.dmg * (1 - 0.5 * (d / R)), p, 16 * (1 - d / R) + 4);
+      if (r === 'hit') this.ctx.hud.callout('SPLAT!', 'bad');
+    }
   }
 
   // Shock wave on the ground: from the front feet (stomp) or at a landing point (leap).
@@ -670,7 +856,7 @@ export class Kaiju {
     this.ctx.destruction?.damage(_u.clone().setY(6), 22);
     this.ctx.traffic?.damageRadius(_u, R, 300, 25);
     this.ctx.props?.damageRadius(_u, R, 25);
-    this.ctx.enemies.damageRadius(_u, R, 200, 25, 0, { type: 'power', skip: this.e });
+    this.ctx.enemies.damageRadius(_u, R, 200, 25, 0, { type: 'power', skip: this.e, noCredit: true });
     player.shake(1.2, 0.8);
     const d = Math.hypot(player.pos.x - _u.x, player.pos.z - _u.z);
     if (d < R && player.pos.y < 6 * SCALE) this.hitPlayer(45 * (1 - 0.5 * d / R), _u, 22);
@@ -696,8 +882,13 @@ export class Kaiju {
     this.fallDir = Math.random() < 0.5 ? -1 : 1;
     for (const f of this.fireballs) this.ctx.scene.remove(f.mesh);
     this.fireballs.length = 0;
-    this.ctx.hud.message('KAIJU DEFEATED!', 3);
-    this.ctx.player.addSuper(100);
+    for (const b of this.choco) this.ctx.scene.remove(b.mesh);
+    this.choco.length = 0;
+    if (!this.e.lastNoCredit) {
+      // (beaten by the other boss: bossfight.js announces the winner instead)
+      this.ctx.hud.message('KAIJU DEFEATED!', 3);
+      this.ctx.player.addSuper(100);
+    }
   }
 
   // Returns true once the body is gone.
@@ -746,10 +937,10 @@ export class KaijuSpawner {
     this.current = null;
   }
 
-  summon() {
-    const { player, city } = this.ctx;
+  summon(cx = this.ctx.player.pos.x, cz = this.ctx.player.pos.z, minD = 350, maxD = 520) {
+    const { city } = this.ctx;
     for (let tries = 0; tries < 20; tries++) {
-      const pt = city.randomStreetPoint(player.pos.x, player.pos.z, 350, 520);
+      const pt = city.randomStreetPoint(cx, cz, minD, maxD);
       if (pt && city.isLand(pt.x, pt.z)) {
         this.current = new Kaiju(this.ctx, pt.x, pt.z);
         return true;
@@ -759,6 +950,7 @@ export class KaijuSpawner {
   }
 
   update(dt, input) {
+    if (this.enabled === false && !this.current) return; // switched off (main.js)
     if (this.current && !this.ctx.enemies.list.includes(this.current.e)) {
       this.current.dispose();
       this.current = null;

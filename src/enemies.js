@@ -3,6 +3,7 @@ import { clamp, lerpAngle } from './util.js';
 import { stride } from './humanoid.js';
 import { createRig } from './models.js';
 import { KAIJU_STATS } from './kaiju.js';
+import { IMPREGNO_STATS } from './impregno.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -31,6 +32,7 @@ const STATS = {
   },
   drone: { hp: 80, r: 0.9, cy: 0, mass: 0.8 },
   kaiju: KAIJU_STATS,
+  impregno: IMPREGNO_STATS,
 };
 
 const geo = {
@@ -611,8 +613,11 @@ export class Enemies {
     e.hp -= amt;
     e.pending += amt;
     if (type !== 'dot') e.flash = 1;
-    this.ctx.player.addSuper(amt * 0.1);
-    this.ctx.combat.onHit(type);
+    e.lastNoCredit = !!opts.noCredit; // bosses hurting each other don't count as the hero's hits
+    if (!opts.noCredit) {
+      this.ctx.player.addSuper(amt * 0.1);
+      this.ctx.combat.onHit(type);
+    }
     if (opts.stun) e.stun = Math.max(e.stun, opts.stun);
     if (opts.knock) {
       e.vel.addScaledVector(opts.knock, e.stats.mass);
@@ -634,6 +639,7 @@ export class Enemies {
     e.mat.emissiveIntensity = 0;
     if (e.shield) e.shield.visible = e.icon.visible = false;
     this.flushDamage(e);
+    if (e.lastNoCredit) return; // killed by another boss
     this.score += e.boss ? 25 : e.type === 'brute' ? 5 : 1;
     this.ctx.hud.setScore(this.score);
     this.ctx.player.addSuper(e.type === 'brute' ? 20 : 4);

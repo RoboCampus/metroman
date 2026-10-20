@@ -11,6 +11,8 @@ import { loadModels } from './models.js';
 import { Impacts } from './impacts.js';
 import { Destruction } from './destruction.js';
 import { KaijuSpawner } from './kaiju.js';
+import { ImpregnoSpawner } from './impregno.js';
+import { BossFight } from './bossfight.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -138,6 +140,9 @@ const blobs = new BlobShadows(scene);
 ctx.impacts = new Impacts(ctx); // craters, scorch marks, shattered windows
 ctx.destruction = new Destruction(ctx, city.destructible); // breakable buildings
 ctx.kaiju = new KaijuSpawner(ctx); // building-sized boss (K summons it)
+ctx.impregno = new ImpregnoSpawner(ctx); // flying mayo boss (I summons him)
+ctx.bossFight = new BossFight(ctx, ctx.kaiju, ctx.impregno); // kaiju vs Impregno Man (B starts a battle)
+ctx.kaiju.timer = ctx.impregno.timer = Infinity; // the first appearance is the boss battle
 const { player, enemies, combat } = ctx;
 let powers = null;
 ctx.getPowers = () => powers;
@@ -336,7 +341,9 @@ function updateBlobShadows() {
   }
   for (const e of enemies.list) {
     if (e.boss) {
-      if (!e.dead) blobs.add(e.pos.x, 0.05, e.pos.z, e.stats.r * 1.8, e.pos.y, 0.6);
+      if (e.dead) continue;
+      const gy = w.groundY(e.pos.x, e.pos.z, e.pos.y + 0.5);
+      blobs.add(e.pos.x, gy, e.pos.z, e.type === 'kaiju' ? e.stats.r * 1.8 : 0.7 * e.stats.scale, e.pos.y - gy, 0.6);
       continue;
     }
     if (e.dead && e.deathT < 0.5) continue;
@@ -361,6 +368,8 @@ function tick(dt) {
   player.update(dt);
   powers.update(dt);
   ctx.kaiju.update(dt, input);
+  ctx.impregno.update(dt, input);
+  ctx.bossFight.update(dt, input);
   enemies.update(dt);
   city.update(dt, elapsed, player.pos);
   ctx.impacts.update(dt);

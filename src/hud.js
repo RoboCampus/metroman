@@ -22,7 +22,7 @@ export class HUD {
     this.hitsEl = $('hits');
     this.nameEl = $('heroName');
     this.bossEl = $('boss');
-    this.bossHp = $('bossHp');
+    this.bossRows = [];
     this.map = $('minimap').getContext('2d');
     this.city = city;
     this.nums = [];
@@ -116,10 +116,24 @@ export class HUD {
       s.el.classList.toggle('ready', !!a.ult && p.super >= 100);
     }
     this.speed.textContent = `${Math.round(p.speed * 3.6)} km/h · altitude ${Math.round(p.pos.y)} m`;
-    // Boss health bar while a kaiju is around
-    const boss = ctx.enemies.list.find((e) => e.boss && !e.dead);
-    this.bossEl.classList.toggle('hidden', !boss);
-    if (boss) this.bossHp.style.width = `${Math.max(0, boss.hp / boss.maxHp) * 100}%`;
+    // A health bar per boss on the scene
+    const bosses = ctx.enemies.list.filter((e) => e.boss && !e.dead);
+    this.bossEl.classList.toggle('hidden', !bosses.length);
+    while (this.bossRows.length < bosses.length) {
+      const row = document.createElement('div');
+      row.className = 'bossRow';
+      row.innerHTML = '<div class="bossName"></div><div class="bar"><div class="fill boss"></div></div>';
+      this.bossEl.appendChild(row);
+      this.bossRows.push({ row, name: row.firstChild, fill: row.querySelector('.fill') });
+    }
+    this.bossRows.forEach((r, i) => {
+      const b = bosses[i];
+      r.row.style.display = b ? '' : 'none';
+      if (!b) return;
+      const name = b.bossName || 'KAIJU';
+      if (r.name.textContent !== name) r.name.textContent = name;
+      r.fill.style.width = `${Math.max(0, b.hp / b.maxHp) * 100}%`;
+    });
 
     this.zoneT -= dt;
     if (this.zoneT <= 0) {
@@ -175,8 +189,8 @@ export class HUD {
     c.drawImage(this.city.minimap, -(p.pos.x - info.minX) * k, -(p.pos.z - info.minZ) * k, info.w * sc, info.h * sc);
     for (const e of enemies.list) {
       if (e.dead) continue;
-      const s = e.boss ? 16 : e.type === 'brute' ? 9 : 5;
-      c.fillStyle = e.boss ? '#ff8a00' : e.type === 'drone' ? '#ff6ad5' : e.type === 'brute' ? '#c86bff' : '#ff3b30';
+      const s = e.type === 'kaiju' ? 16 : e.boss ? 11 : e.type === 'brute' ? 9 : 5;
+      c.fillStyle = e.boss ? e.mapColor || '#ff8a00' : e.type === 'drone' ? '#ff6ad5' : e.type === 'brute' ? '#c86bff' : '#ff3b30';
       c.fillRect((e.pos.x - p.pos.x) * k - s / 2, (e.pos.z - p.pos.z) * k - s / 2, s, s);
     }
     c.restore();

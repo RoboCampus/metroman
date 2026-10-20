@@ -24,7 +24,8 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #000; colo
 .sc { background: linear-gradient(90deg, #c78f00, #ffe066); }
 #boss { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); width: min(520px, 60vw); text-align: center; }
 #boss.hidden { display: none; }
-#bossName { font-size: 13px; font-weight: 900; letter-spacing: 6px; color: #ffb36b; text-shadow: 0 1px 6px #000; margin-bottom: 4px; }
+.bossRow { margin-bottom: 6px; }
+.bossName { font-size: 13px; font-weight: 900; letter-spacing: 6px; color: #ffb36b; text-shadow: 0 1px 6px #000; margin-bottom: 4px; }
 .boss { background: linear-gradient(90deg, #8a1c00, #ff7a1a); transition: width .15s; }
 #scLabel { font-size: 9px; letter-spacing: 2px; opacity: .7; text-shadow: 0 1px 2px #000; }
 

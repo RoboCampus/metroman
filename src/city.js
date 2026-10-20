@@ -1150,8 +1150,24 @@ export function buildCity(scene) {
     return null;
   }
 
+  // The city block around (x, z), including half of the streets around it.
+  function blockAt(x, z) {
+    if (inRect(x, z, MANHATTAN)) {
+      const x0 = MANHATTAN.minX + Math.floor((x - MANHATTAN.minX) / AVE_SP) * AVE_SP;
+      const z0 = MANHATTAN.minZ + Math.floor((z - MANHATTAN.minZ) / ST_SP) * ST_SP;
+      return { x0, x1: x0 + AVE_SP, z0, z1: z0 + ST_SP };
+    }
+    // Brooklyn and Jersey City grids (see district() below): 110 x 70 m cells
+    for (const ox of [950, -1560]) {
+      if (x < ox + 20 || x > ox + 610) continue;
+      const x0 = ox + 20 + Math.floor((x - ox - 20) / 110) * 110, z0 = -1280 + Math.floor((z + 1280) / 70) * 70;
+      return { x0, x1: x0 + 110, z0, z1: z0 + 70 };
+    }
+    return null;
+  }
+
   return {
-    world, minimap, mapInfo, update, randomStreetPoint, zoneName, isLand, treeCount, traffic, props: trees,
+    world, minimap, mapInfo, update, randomStreetPoint, zoneName, isLand, treeCount, traffic, props: trees, blockAt,
     destructible: { groups, styleMats },
     spawn: new THREE.Vector3(0, 0, -380),
   };

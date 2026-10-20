@@ -122,7 +122,30 @@ function makeTextures() {
       g.fill();
     }
   });
-  return { crater, ember, scorch, glass };
+  // Glossy chocolate splat: a blob with droplets flung around it
+  const splat = canvasTex((g, S) => {
+    const c = S / 2;
+    g.fillStyle = 'rgba(62,34,16,.95)';
+    for (let i = 0; i < 18; i++) {
+      const a = Math.random() * Math.PI * 2, r = Math.random() * S * 0.16;
+      g.beginPath();
+      g.arc(c + Math.cos(a) * r, c + Math.sin(a) * r, S * (0.1 + Math.random() * 0.1), 0, Math.PI * 2);
+      g.fill();
+    }
+    for (let i = 0; i < 40; i++) {
+      const a = Math.random() * Math.PI * 2, r = S * (0.25 + Math.random() * 0.22);
+      g.beginPath();
+      g.arc(c + Math.cos(a) * r, c + Math.sin(a) * r, S * (0.008 + Math.random() * 0.025), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.fillStyle = 'rgba(150,95,55,.35)'; // shiny highlights
+    for (let i = 0; i < 6; i++) {
+      g.beginPath();
+      g.ellipse(c + (Math.random() - 0.5) * S * 0.2, c + (Math.random() - 0.5) * S * 0.2, S * 0.05, S * 0.02, Math.random() * 3, 0, Math.PI * 2);
+      g.fill();
+    }
+  });
+  return { crater, ember, scorch, glass, splat };
 }
 
 class Decals {
@@ -144,7 +167,7 @@ class Decals {
     this.next = 0;
   }
 
-  // kind: 'crater' | 'scorch' | 'glass'. normal: unit surface normal.
+  // kind: 'crater' | 'scorch' | 'glass' | 'splat'. normal: unit surface normal.
   add(kind, pos, normal, size, life, emberKind = null) {
     const d = this.pool[this.next];
     this.next = (this.next + 1) % this.pool.length; // oldest mark is recycled
@@ -210,6 +233,7 @@ export class Impacts {
       else if (Math.abs(n.y) < 0.5) this.wall(_p, n, size, kind);
     }
     if (blast >= 4) this.shatterAround(_p.clone(), blast);
+    for (const f of this.ctx.mayoFloods ?? []) f.blast(at, Math.max(size, blast, 3)); // blow mayo heaps apart
     // Strong blasts and heavy direct wall hits knock chunks out of buildings
     const dest = this.ctx.destruction;
     if (blast >= 4) dest?.damage(at, blast * 0.45);
