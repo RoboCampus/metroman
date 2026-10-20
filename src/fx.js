@@ -244,17 +244,18 @@ export class FX {
   }
 
   // Jagged camera-facing lightning ribbon (white core + colored glow), with random branches.
+  // Big bolts: segs (max segments), maxAmp (max sideways jag in metres), branches (forks to add).
   bolt(from, to, o = {}) {
-    const { color = 0x7fcfff, width = 0.4, life = 0.12, jag = 0.12 } = o;
+    const { color = 0x7fcfff, width = 0.4, life = 0.12, jag = 0.12, segs = 30, maxAmp = 4, branches = null } = o;
     const len = from.distanceTo(to);
     if (len < 0.05) return;
-    const n = Math.max(3, Math.min(30, Math.round(len / 1.6)));
+    const n = Math.max(3, Math.min(segs, Math.round(len / 1.6)));
     _d.subVectors(to, from).normalize();
     _p.set(0, 1, 0);
     if (Math.abs(_d.y) > 0.9) _p.set(1, 0, 0);
     _p.cross(_d).normalize();
     _q.crossVectors(_d, _p);
-    const amp = Math.min(len * jag, 4);
+    const amp = Math.min(len * jag, maxAmp);
     const pts = [];
     for (let i = 0; i <= n; i++) {
       const t = i / n, env = Math.sin(Math.PI * t);
@@ -267,7 +268,15 @@ export class FX {
     }
     const meshes = [this.ribbon(pts, width * 0.35, 0xffffff, 1), this.ribbon(pts, width * 1.8, color, 0.55)];
     this.bolts.push({ meshes, life, max: life });
-    if (len > 8 && Math.random() < 0.7) {
+    if (branches) {
+      // Forks off the main channel, each a smaller jagged bolt
+      for (let k = 0; k < branches; k++) {
+        const bp = pts[1 + ((Math.random() * (n - 1) * 0.8) | 0)];
+        const dir = _d.subVectors(to, from).normalize().add(randomDir(_v).multiplyScalar(0.9)).normalize();
+        const end = bp.clone().addScaledVector(dir, len * (0.12 + Math.random() * 0.25));
+        this.bolt(bp, end, { color, width: width * 0.45, life, jag, segs: Math.max(12, segs >> 1), maxAmp: maxAmp * 0.5, branches: 0 });
+      }
+    } else if (branches === null && len > 8 && Math.random() < 0.7) {
       const bp = pts[1 + ((Math.random() * (n - 1)) | 0)];
       const end = randomDir(new THREE.Vector3()).multiplyScalar(len * 0.2).add(bp);
       this.bolt(bp, end, { color, width: width * 0.5, life, jag });

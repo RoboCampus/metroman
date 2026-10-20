@@ -135,7 +135,7 @@ export class Destruction {
     const world = this.ctx.world;
     const groups = new Set();
     for (const b of world.query(point.x - radius, point.z - radius, point.x + radius, point.z + radius)) {
-      if (!b.group || b.group.round || b.minY > point.y + radius || b.maxY < point.y - radius) continue;
+      if (!b.group || b.group.round || b.group.erased || b.minY > point.y + radius || b.maxY < point.y - radius) continue;
       if (point.x < b.minX - radius || point.x > b.maxX + radius || point.z < b.minZ - radius || point.z > b.maxZ + radius) continue;
       groups.add(b.group);
     }
@@ -522,9 +522,68 @@ export class Destruction {
     });
   }
 
+  // Wipe a whole building out of existence at once (no rubble). It comes back after `after` seconds.
+  erase(g, after = 120) {
+    const world = this.ctx.world;
+    for (let b = this.bodies.length - 1; b >= 0; b--) {
+      const body = this.bodies[b];
+      if (body.g !== g) continue;
+      for (const it of body.list) this.hide(it.v, it.i);
+      this.bodies.splice(b, 1);
+    }
+    for (const v of g.vols ?? []) {
+      world.removeVolume(v);
+      this.ctx.scene.remove(v.mesh);
+      if (v.mesh.material !== this.slabMat) v.mesh.material.dispose();
+      v.mesh.dispose();
+    }
+    g.vols = null;
+    for (const w of g.walls) {
+      if (w.box) w.box.disabled = true;
+      if (w.part) collapse(w.part);
+    }
+    for (const part of g.parts) collapse(part);
+    g.erased = true;
+    g.bodies = 0;
+    g.restoreT = after;
+    this.active.add(g);
+  }
+
+  // Pull blocks out of a building whole, for effects that carry them off (the Watcher's lift):
+  // fractures it, removes every block whose centre passes take(centre), and returns them as
+  // { pos, size, slab, color }. Roof gear passing take() goes too. Restores like any damage.
+  extract(g, take) {
+    this.fracture(g);
+    const out = [];
+    for (const v of g.vols) {
+      for (let i = 0; i < v.occ.length; i++) {
+        if (!v.occ[i]) continue;
+        const c = blockShape(v, i, new THREE.Vector3(), _s);
+        if (!take(c)) continue;
+        const size = _s.clone(); // (before hide(), which reuses _s)
+        v.occ[i] = 0;
+        g.alive--;
+        this.hide(v, i);
+        out.push({ pos: c, size, slab: !!v.slab, color: v.slab ? '#9a958d' : v.wall.color });
+      }
+    }
+    for (const part of g.parts) if (take(_v.set(part.x, part.y, part.z))) collapse(part);
+    g.restoreT = RESTORE;
+    this.active.add(g);
+    return out;
+  }
+
+  // Bring an erased building back right away.
+  unerase(g) {
+    if (!g.erased) return;
+    this.active.delete(g);
+    this.restore(g);
+  }
+
   restore(g) {
     const world = this.ctx.world;
-    for (const v of g.vols) {
+    g.erased = false;
+    for (const v of g.vols ?? []) {
       world.removeVolume(v);
       this.ctx.scene.remove(v.mesh);
       if (v.mesh.material !== this.slabMat) v.mesh.material.dispose();

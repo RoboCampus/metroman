@@ -13,6 +13,8 @@ import { Destruction } from './destruction.js';
 import { KaijuSpawner } from './kaiju.js';
 import { ImpregnoSpawner } from './impregno.js';
 import { AlienSpawner } from './alien.js';
+import { EggSpawner } from './egg.js';
+import { Watcher } from './watcher.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -141,10 +143,12 @@ ctx.impacts = new Impacts(ctx); // craters, scorch marks, shattered windows
 ctx.destruction = new Destruction(ctx, city.destructible); // breakable buildings
 ctx.kaiju = new KaijuSpawner(ctx); // building-sized boss (K summons it)
 ctx.impregno = new ImpregnoSpawner(ctx); // flying mayo boss (I summons him)
-// Both boss fights are temporarily disabled (no spawns, K / I do nothing). To bring them back,
-// delete this line; for the kaiju vs Impregno Man battle see bossfight.js.
-ctx.kaiju.enabled = ctx.impregno.enabled = false;
-ctx.aliens = new AlienSpawner(ctx, city.destructible.groups); // alien spheres break out of buildings (U summons one)
+ctx.aliens = new AlienSpawner(ctx, city.destructible.groups); // alien spheres break out of buildings (U summons a wave)
+ctx.eggs = new EggSpawner(ctx); // warden eggs come through rifts and cage the hero (O summons one)
+// Temporarily disabled (no spawns, their keys do nothing): delete a name here to bring it back.
+// For the kaiju vs Impregno Man battle see bossfight.js.
+for (const s of [ctx.kaiju, ctx.impregno, ctx.aliens, ctx.eggs]) s.enabled = false;
+ctx.watcher = new Watcher(ctx); // a glowing blue man watches from a black hole in the sky (M summons him)
 const { player, enemies, combat } = ctx;
 let powers = null;
 ctx.getPowers = () => powers;
@@ -372,6 +376,8 @@ function tick(dt) {
   ctx.kaiju.update(dt, input);
   ctx.impregno.update(dt, input);
   ctx.aliens.update(dt, input);
+  ctx.eggs.update(dt, input);
+  ctx.watcher.update(dt, input);
   enemies.update(dt);
   city.update(dt, elapsed, player.pos);
   ctx.impacts.update(dt);
@@ -389,4 +395,10 @@ ctx.step = (n = 1, dt = 1 / 60) => {
     tick(dt);
     input.endFrame();
   }
+};
+// Debug: draw one frame now (for screenshots after ctx.step).
+ctx.render = () => {
+  sky.position.copy(camera.position);
+  if (quality === 'high') composer.render();
+  else renderer.render(scene, camera);
 };

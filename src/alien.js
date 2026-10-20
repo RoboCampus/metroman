@@ -5,8 +5,10 @@ import { clamp } from './util.js';
 //   - Before each shot a thin red aiming laser tracks the hero, then locks on for a moment: that's
 //     the moment to dodge (roll) or block. Then the real laser fires along the locked line: huge
 //     damage, reaches 600 m and burns into whatever it hits.
-//   - It arrives by breaking out of a building near the hero (one every 3 minutes): the building
-//     rumbles, then the sphere smashes its way out, tearing chunks off it.
+//   - Sometimes it sees an attack coming (a projectile on its way, or the hero casting while aiming at
+//     it) and darts sideways out of the way.
+//   - They arrive in waves of 4, each breaking out of its own building near the hero (a wave every
+//     3 minutes): the building rumbles, then the sphere smashes its way out, tearing chunks off it.
 // Like the bosses it lives in enemies.list (so every attack hurts it) with its own update.
 
 const HP = 900;
@@ -14,9 +16,12 @@ const BASE = 3; // the model is built at this radius and scaled up to RADIUS
 const RADIUS = 6; // 12 m across
 const SPEED = 14;
 const KEEP = { min: 60, max: 140, height: [15, 35] };
-const LASER = { aim: 1.0, lock: 0.25, fire: 0.4, range: 600, width: 1.6, dmg: 70, cooldown: [1.2, 2.2] };
+const LASER = { aim: 1.0, lock: 0.12, fire: 0.4, range: 600, width: 1.6, dmg: 70, cooldown: [1.2, 2.2] };
 const EMERGE = { rumble: 2.5, out: 20 }; // seconds of rumbling, exit speed (m/s)
 const SPAWN_FIRST = 10, SPAWN_EVERY = 180;
+const WAVE = 4; // spheres per wave, each from its own building
+// Evasion: sometimes it sees an attack coming and darts sideways
+const EVADE = { chance: 0.4, speed: 48, time: 0.3, cooldown: 1.2, warn: 0.6 }; // warn: seconds of projectile flight it reacts to
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3();
 const Y = new THREE.Vector3(0, 1, 0);
 
@@ -40,7 +45,8 @@ const mats = {
 };
 
 export class AlienSphere {
-  constructor(ctx, group, at) {
+  // i: its place in the wave (staggers the break-outs and first shots so they don't all go at once)
+  constructor(ctx, group, at, i = 0) {
     this.ctx = ctx;
     const root = new THREE.Group();
     const body = new THREE.Mesh(geo.body, new THREE.MeshStandardMaterial({ color: '#8d9299', roughness: 0.28, metalness: 0.92, emissive: '#ffffff', emissiveIntensity: 0 }));
@@ -92,18 +98,23 @@ export class AlienSphere {
     this.toP = new THREE.Vector3();
     this.home = group; // the building it's coming out of
     this.state = 'rumble';
-    this.stateT = EMERGE.rumble;
-    this.cd = 2;
+    this.stateT = EMERGE.rumble + i * 0.6;
+    this.cd = 2 + i * 0.7;
     this.aimDir = new THREE.Vector3(0, 0, -1);
     this.orbit = Math.random() * Math.PI * 2;
     this.bob = Math.random() * 10;
     this.carveT = 0;
+    this.evadeT = 0; // > 0 while darting aside
+    this.evadeCd = 0;
+    this.evadeVel = new THREE.Vector3();
+    this.seen = new WeakSet(); // projectiles it has already reacted to (one roll of the dice each)
+    this.lastCast = 0;
     // Way out: horizontally toward the hero, until clear of the building
     _v.subVectors(ctx.player.pos, at).setY(0);
     if (_v.lengthSq() < 1) _v.set(1, 0, 0);
     this.exitDir = _v.normalize().clone();
     root.visible = false; // hidden inside the building while it rumbles
-    ctx.hud.callout('SOMETHING IS INSIDE THAT BUILDING!', 'bad');
+    if (i === 0) ctx.hud.callout('SOMETHING IS INSIDE THOSE BUILDINGS!', 'bad');
   }
 
   eyePos(out) {
@@ -151,6 +162,7 @@ export class AlienSphere {
         this.face(this.exitDir, dt);
         break;
       case 'hunt': {
+        this.evade(dt);
         this.cd -= dt;
         if (this.cd <= 0 && !player.dead && dist < LASER.range * 0.8 && this.clearShot(heroC)) {
           this.state = 'aim';
@@ -162,6 +174,7 @@ export class AlienSphere {
         break;
       }
       case 'aim': {
+        this.evade(dt);
         // Thin red laser tracks the hero, then locks on just before firing
         const locked = this.stateT < LASER.lock;
         this.eyePos(_u);
@@ -224,6 +237,53 @@ export class AlienSphere {
     // Bump off buildings
     const r = world.resolve(e.pos, RADIUS, RADIUS * 2, this.vel, dt, 0);
     if (r.wall) this.vel.y += 20 * dt;
+  }
+
+  // Watch for incoming attacks; on some of them, dart sideways at high speed.
+  evade(dt) {
+    const e = this.e, { player } = this.ctx;
+    this.evadeCd -= dt;
+    if (this.evadeT > 0) {
+      this.evadeT -= dt;
+      e.pos.addScaledVector(this.evadeVel, dt);
+      this.ctx.world.resolve(e.pos, RADIUS, RADIUS * 2, this.evadeVel, dt, 0);
+      // afterimage streak
+      this.ctx.fx.spawn(e.pos.x, e.pos.y, e.pos.z, 0, 0, 0, 0.25, RADIUS * 1.6, RADIUS, [0.6, 0.62, 0.68], [0.3, 0.3, 0.35], 0, 0);
+      return;
+    }
+    let threat = null;
+    // Projectiles on their way that would hit within the next moment
+    for (const p of this.ctx.getPowers?.()?.projectiles ?? []) {
+      if (this.seen.has(p)) continue;
+      const speed = p.vel.length();
+      _v.subVectors(e.pos, p.pos);
+      const dir = _w.copy(p.vel).divideScalar(speed || 1);
+      const along = _v.dot(dir);
+      if (along <= 0 || along > speed * EVADE.warn) continue;
+      if (_u.copy(p.pos).addScaledVector(dir, along).distanceTo(e.pos) > RADIUS + (p.radius ?? 0.4) + 1.5) continue;
+      this.seen.add(p);
+      threat = dir;
+      break;
+    }
+    // The hero just cast something with the crosshair on it (instant-hit powers)
+    if (!threat && player.castT > this.lastCast + 0.05) {
+      const cam = this.ctx.camera.position, cp = Math.cos(player.pitch);
+      const fwd = _w.set(-Math.sin(player.yaw) * cp, Math.sin(player.pitch), -Math.cos(player.yaw) * cp);
+      _v.subVectors(e.pos, cam);
+      const along = _v.dot(fwd);
+      if (along > 0 && _u.copy(cam).addScaledVector(fwd, along).distanceTo(e.pos) < RADIUS + 3) threat = fwd;
+    }
+    this.lastCast = player.castT;
+    if (!threat || this.evadeCd > 0 || Math.random() > EVADE.chance) return;
+    // Dart sideways (perpendicular to the attack), a bit up or down too
+    const side = _v.crossVectors(threat, Y);
+    if (side.lengthSq() < 1e-4) side.set(1, 0, 0);
+    side.normalize().multiplyScalar(Math.random() < 0.5 ? -1 : 1);
+    side.y += (Math.random() - 0.5) * 0.6;
+    this.evadeVel.copy(side.normalize()).multiplyScalar(EVADE.speed);
+    this.evadeT = EVADE.time;
+    this.evadeCd = EVADE.cooldown;
+    this.ctx.enemies.label(e, 'EVADED', 'blocked');
   }
 
   face(dir, dt) {
@@ -305,7 +365,7 @@ export class AlienSphere {
         2.5, 3, 9, [0.5, 0.47, 0.43], [0.3, 0.28, 0.26], 0.3, 1);
     }
     this.ctx.player.shake(0.6, 0.5);
-    this.ctx.hud.callout('ALIEN SPHERE!', 'bad');
+    this.ctx.hud.callout('ALIEN SPHERES!', 'bad');
   }
 
   insideHome(p, pad) {
@@ -350,7 +410,8 @@ export class AlienSphere {
   }
 }
 
-// One alien sphere every 3 minutes, breaking out of a random building near the hero. U summons one now.
+// A wave of 4 alien spheres every 3 minutes, each breaking out of a different building near the
+// hero. U summons a wave now.
 export class AlienSpawner {
   constructor(ctx, groups) {
     this.ctx = ctx;
@@ -359,25 +420,35 @@ export class AlienSpawner {
     this.list = [];
   }
 
-  // A building 70-250 m from the hero, and a point inside it about halfway up.
-  pickBuilding() {
+  // Up to n different buildings 70-250 m from the hero, spread out (at least 60 m apart when
+  // possible), each with a point inside it about halfway up.
+  pickBuildings(n) {
     const p = this.ctx.player.pos;
     const near = this.groups.filter((g) => {
       const w = g.walls[0];
       const d = Math.hypot(w.cx - p.x, w.cz - p.z);
       return d > 70 && d < 250 && !g.vols?.length; // not one that's already wrecked
     });
-    if (!near.length) return null;
-    const g = near[(Math.random() * near.length) | 0];
-    const w = g.walls.reduce((a, b) => (b.h > a.h ? b : a));
-    return { g, at: new THREE.Vector3(w.cx, w.y0 + Math.min(w.h * 0.5, 60), w.cz) };
+    for (let i = near.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      [near[i], near[j]] = [near[j], near[i]];
+    }
+    const picks = [];
+    for (const minGap of [60, 0]) {
+      for (const g of near) {
+        if (picks.length >= n) break;
+        const w = g.walls.reduce((a, b) => (b.h > a.h ? b : a));
+        if (picks.some((q) => q.g === g || Math.hypot(q.at.x - w.cx, q.at.z - w.cz) < minGap)) continue;
+        picks.push({ g, at: new THREE.Vector3(w.cx, w.y0 + Math.min(w.h * 0.5, 60), w.cz) });
+      }
+    }
+    return picks;
   }
 
   spawn() {
-    const pick = this.pickBuilding();
-    if (!pick) return false;
-    this.list.push(new AlienSphere(this.ctx, pick.g, pick.at));
-    return true;
+    const picks = this.pickBuildings(WAVE);
+    picks.forEach((pick, i) => this.list.push(new AlienSphere(this.ctx, pick.g, pick.at, i)));
+    return picks.length > 0;
   }
 
   update(dt, input) {
@@ -387,6 +458,7 @@ export class AlienSpawner {
       a.dispose();
       return false;
     });
+    if (this.enabled === false) return; // switched off (main.js)
     this.timer -= dt;
     if (input?.hit('KeyU') || this.timer <= 0) this.timer = this.spawn() ? SPAWN_EVERY : 5;
   }

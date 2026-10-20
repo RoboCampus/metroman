@@ -5,6 +5,7 @@ import { createRig } from './models.js';
 import { KAIJU_STATS } from './kaiju.js';
 import { IMPREGNO_STATS } from './impregno.js';
 import { ALIEN_STATS } from './alien.js';
+import { EGG_STATS } from './egg.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -35,6 +36,7 @@ const STATS = {
   kaiju: KAIJU_STATS,
   impregno: IMPREGNO_STATS,
   alien: ALIEN_STATS,
+  egg: EGG_STATS,
 };
 
 const geo = {

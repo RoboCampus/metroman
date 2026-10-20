@@ -21,6 +21,7 @@ const FLY_SPEED = 30, FLY_BOOST = 90;
 const RUN_SPEED = 13, SUPER_SPEED = FLY_BOOST * 1.3; // super speed tops flight by 30%
 const GRAVITY = 34;
 const BLOCK_MOVE = 0.3; // movement speed multiplier while blocking
+const CAGED_MOVE = 0.25; // inside a warden egg's freezing cage: too slow to sidestep a laser, dodge instead
 const BREAKOUT_CD = 6;
 // Dodge: while blocking (hold Left Ctrl), tap a direction. Short burst with invulnerability, then a cooldown.
 // A tap during the cooldown is buffered briefly so chained dodges don't get dropped.
@@ -112,6 +113,11 @@ export class Player {
     this.dodgeDir = new THREE.Vector3();
     this.dodgeKind = 'roll';
     this.dodgeSign = 1;
+    this.caged = 0; // > 0 while held in a warden egg's cage (no boost)
+    this.launchT = 0; // > 0 while thrown through the air (controls do nothing)
+    this.launchVel = new THREE.Vector3();
+    this.launchStuck = 0;
+    this.tumble = 0;
     this.path = []; // recent positions while sprinting (lightning trail)
     this.pathT = 0;
     this.stepT = 0; // foot smoke cadence
@@ -317,6 +323,7 @@ export class Player {
     if (inp.wheel) this.camDist = clamp(this.camDist + inp.wheel * 0.006, 3.5, 16);
     this.castT -= dt;
     this.sinceHurt += dt;
+    this.caged -= dt; // a warden egg's cage keeps setting this while the hero is inside
     this.wallContact -= dt;
     this.immuneT -= dt;
     this.breakoutCd -= dt;
@@ -336,10 +343,19 @@ export class Player {
       this.updateDown(dt, inp);
       return;
     }
-    this.blocking = inp.down('ControlLeft') && this.dodgeT <= 0;
-    this.handleDodgeInput(dt, inp);
+    this.blocking = inp.down('ControlLeft') && this.dodgeT <= 0 && this.launchT <= 0;
+    if (this.launchT <= 0) this.handleDodgeInput(dt, inp);
     let lungeEnded = false;
-    if (this.lungeT > 0) {
+    if (this.launchT > 0) {
+      // Thrown: fly along the launch path tumbling, smashing through whatever is in the way
+      this.launchT -= dt;
+      this.launchVel.y -= 8 * dt;
+      this.vel.copy(this.launchVel);
+      this.tumble += dt * 9;
+      this.launchStuck = this.wallContact > 0 ? this.launchStuck + dt : 0;
+      if (this.launchStuck > 0.4) this.launchT = 0; // hit something that won't break
+      if (this.launchT <= 0) this.vel.multiplyScalar(0.25);
+    } else if (this.lungeT > 0) {
       this.vel.copy(this.lungeVel);
       this.lungeT -= dt;
       lungeEnded = this.lungeT <= 0;
@@ -351,11 +367,11 @@ export class Player {
     this.animate(dt);
     // Pressing Shift in super speed kicks the lightning in straight away; in flight it's the
     // boost, which sets off a shock wave.
-    const shift = inp.shift && this.movement === 'speed';
+    const shift = this.boostKey(inp) && this.movement === 'speed';
     if (shift && !this.wasShift) this.speedBurst();
     this.wasShift = shift;
     this.sprinting = shift; // lightning keeps going for as long as Shift is held
-    const boost = inp.shift && this.movement === 'flight' && !this.blocking;
+    const boost = this.boostKey(inp) && this.movement === 'flight' && !this.blocking;
     if (boost && !this.wasBoost) this.boostWave();
     this.wasBoost = boost;
     this.trails(dt);
@@ -377,6 +393,22 @@ export class Player {
     this.integrate(dt);
     this.animate(dt);
     this.updateCamera(dt);
+  }
+
+  // Throw the hero: vel (m/s) for `time` seconds, no control until it ends.
+  launch(vel, time) {
+    this.launchVel.copy(vel);
+    this.launchT = time;
+    this.launchStuck = 0;
+    this.blocking = false;
+    this.dodgeT = 0;
+    this.lungeT = 0;
+    this.atk = null;
+  }
+
+  // Shift (super speed sprint / flight boost), unless a warden egg's cage has the hero locked down.
+  boostKey(inp) {
+    return inp.shift && !(this.caged > 0);
   }
 
   axes(inp) {
@@ -442,8 +474,8 @@ export class Player {
     // Forward follows the camera (including pitch), so you fly where you look.
     _v.set(-sy * cp * f + cy * s, Math.sin(this.pitch) * f + u, -cy * cp * f - sy * s);
     const moving = _v.lengthSq() > 0;
-    if (moving) _v.normalize().multiplyScalar((inp.shift && !this.blocking ? FLY_BOOST : FLY_SPEED) * (this.blocking ? BLOCK_MOVE : 1));
-    const k = moving ? (inp.shift ? 2.2 : 4) : 3;
+    if (moving) _v.normalize().multiplyScalar((this.boostKey(inp) && !this.blocking ? FLY_BOOST : FLY_SPEED) * (this.blocking ? BLOCK_MOVE : 1) * (this.caged > 0 ? CAGED_MOVE : 1));
+    const k = moving ? (this.boostKey(inp) ? 2.2 : 4) : 3;
     this.vel.lerp(_v, 1 - Math.exp(-k * dt));
     this.wallRun = false;
   }
@@ -451,9 +483,9 @@ export class Player {
   moveSpeed(dt, inp) {
     const [f, s] = this.axes(inp);
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
-    const fast = inp.shift && !this.blocking;
+    const fast = this.boostKey(inp) && !this.blocking;
     _v.set(-sy * f + cy * s, 0, -cy * f - sy * s);
-    if (_v.lengthSq() > 0) _v.normalize().multiplyScalar((fast ? SUPER_SPEED : RUN_SPEED) * (this.blocking ? BLOCK_MOVE : 1));
+    if (_v.lengthSq() > 0) _v.normalize().multiplyScalar((fast ? SUPER_SPEED : RUN_SPEED) * (this.blocking ? BLOCK_MOVE : 1) * (this.caged > 0 ? CAGED_MOVE : 1));
     const k = this.grounded || this.wallRun ? (fast ? 3 : 12) : 1.6;
     const a = 1 - Math.exp(-k * dt);
     this.vel.x += (_v.x - this.vel.x) * a;
@@ -628,6 +660,7 @@ export class Player {
 
     // Dodge: barrel roll (left/right) or somersault (front/back); knockdown: fall onto the back.
     this.spin.rotation.set(this.fall * 1.45, 0, 0);
+    if (this.launchT > 0) this.spin.rotation.x = this.tumble; // tumbling head over heels
     this.spin.position.y = this.rig.hipY * (1 - this.fall * 0.65);
     if (this.dodgeT > 0) {
       const a = (1 - this.dodgeT / DODGE_TIME) * Math.PI * 2 * this.dodgeSign;
