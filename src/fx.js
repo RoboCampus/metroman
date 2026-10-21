@@ -4,6 +4,7 @@ import { randomDir } from './util.js';
 const MAXP = 9000;
 const WHITE = [1, 1, 1];
 const _v = new THREE.Vector3(), _d = new THREE.Vector3(), _p = new THREE.Vector3(), _q = new THREE.Vector3();
+const _up = new THREE.Vector3(0, 1, 0);
 
 const VERT = /* glsl */ `
 attribute vec3 aColor;
@@ -170,7 +171,8 @@ export class BlobShadows {
   // (x, z) on ground height gy; height = how far the caster is above the ground.
   add(x, gy, z, radius, height = 0, strength = 0.75) {
     if (this.n >= this.pool.length) return;
-    const fade = Math.max(0, 1 - height / 35);
+    height = Math.max(0, height); // (a bad ground height must not turn into a huge, inside-out, opacity-75 blob)
+    const fade = Math.min(1, Math.max(0, 1 - height / 35));
     if (fade <= 0.02) return;
     const m = this.pool[this.n++];
     m.visible = true;
@@ -231,13 +233,15 @@ export class FX {
     best.t = best.dur = dur;
   }
 
-  ring(pos, color, radius, dur = 0.4) {
+  // Expanding ring, flat on the ground (or facing along `normal`, e.g. a punch's shock wave).
+  ring(pos, color, radius, dur = 0.4, normal = null) {
     const m = new THREE.Mesh(this.ringGeo, new THREE.MeshBasicMaterial({
       color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
       side: THREE.DoubleSide, toneMapped: false,
     }));
     m.position.copy(pos);
-    m.position.y += 0.3;
+    if (normal) m.quaternion.setFromUnitVectors(_up, _d.copy(normal).normalize());
+    else m.position.y += 0.3;
     m.scale.setScalar(0.5);
     this.scene.add(m);
     this.rings.push({ m, t: 0, dur, radius });

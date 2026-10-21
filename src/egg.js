@@ -67,7 +67,7 @@ function makeCage() {
       uniform vec3 uColor; uniform float uPulse; uniform float uTime;
       varying vec3 vN; varying vec3 vV; varying float vY;
       void main() {
-        float f = pow(1.0 - abs(dot(vN, vV)), 2.5);
+        float f = pow(clamp(1.0 - abs(dot(normalize(vN), normalize(vV))), 0.0, 1.0), 2.5); // (clamped: pow of a negative is NaN, which bloom smears into black squares)
         float scan = 0.5 + 0.5 * sin(vY * 40.0 - uTime * 4.0); // scrolling scan lines
         float a = f * 0.55 + scan * 0.05 + uPulse * 0.35;
         gl_FragColor = vec4(uColor * (0.6 + uPulse), a);

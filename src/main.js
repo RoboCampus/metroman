@@ -15,11 +15,15 @@ import { ImpregnoSpawner } from './impregno.js';
 import { AlienSpawner } from './alien.js';
 import { EggSpawner } from './egg.js';
 import { Watcher } from './watcher.js';
+import { ChargerSpawner } from './charger.js';
+import { RaptorSpawner } from './raptor.js';
+import { Pocket } from './pocket.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 
 // ---------------------------------------------------------------- renderer & scene
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -82,7 +86,8 @@ scene.add(sky);
   scene.environment = pmrem.fromScene(envScene, 0.02, 1, 1000).texture;
 }
 
-scene.add(new THREE.HemisphereLight('#a8b8ff', '#5a4a48', 1.1)); // fills the street canyons that stay in building shade
+const hemi = new THREE.HemisphereLight('#a8b8ff', '#5a4a48', 1.1);
+scene.add(hemi); // fills the street canyons that stay in building shade
 const sun = new THREE.DirectionalLight('#ffb37a', 2.4);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
@@ -95,6 +100,19 @@ scene.add(sun, sun.target);
 // High: bloom (glowing windows, crowns, headlights, powers) + shadows. Low: neither, 1x pixels.
 const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(innerWidth, innerHeight, { type: THREE.HalfFloatType, samples: 4 }));
 composer.addPass(new RenderPass(scene, camera));
+// Clean the frame before bloom: one broken pixel (NaN, negative, or too bright for the half-float
+// buffer) would otherwise be blurred into a big black or white square.
+composer.addPass(new ShaderPass({
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `
+    uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (any(isnan(c))) c = vec4(0.0, 0.0, 0.0, 1.0);
+      gl_FragColor = vec4(clamp(c.rgb, 0.0, 40.0), c.a);
+    }`,
+}));
 const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth / 2, innerHeight / 2), 0.55, 0.45, 0.9);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
@@ -123,10 +141,12 @@ applyQuality(quality);
 
 // ---------------------------------------------------------------- game objects
 const input = new Input(renderer.domElement);
+const beforeCity = new Set(scene.children);
 const city = buildCity(scene);
+const cityObjects = scene.children.filter((o) => !beforeCity.has(o)); // hidden while the hero is in the pocket dimension
 const fx = new FX(scene, camera);
 const hud = new HUD(city);
-const ctx = { scene, camera, input, city, world: city.world, fx, hud };
+const ctx = { scene, camera, input, city, world: city.world, fx, hud, cityObjects, sky, sun, hemi };
 // Character models (models.js). If they can't load, the procedural characters are used instead.
 document.getElementById('loading').textContent = 'Loading characters…';
 const loaded = await loadModels();
@@ -148,11 +168,14 @@ ctx.eggs = new EggSpawner(ctx); // warden eggs come through rifts and cage the h
 // Temporarily disabled (no spawns, their keys do nothing): delete a name here to bring it back.
 // For the kaiju vs Impregno Man battle see bossfight.js.
 for (const s of [ctx.kaiju, ctx.impregno, ctx.aliens, ctx.eggs]) s.enabled = false;
+ctx.chargers = new ChargerSpawner(ctx); // bruisers that charge and launch the hero (J summons one)
+ctx.raptors = new RaptorSpawner(ctx); // flyers that ram the hero or grab and hurl them down (H summons one)
 ctx.watcher = new Watcher(ctx); // a glowing blue man watches from a black hole in the sky (M summons him)
+ctx.pocket = new Pocket(ctx); // his pocket dimension: fly into the white sphere of a lift (L) to get in
 const { player, enemies, combat } = ctx;
 let powers = null;
 ctx.getPowers = () => powers;
-if (new URLSearchParams(location.search).has('debug')) window.game = ctx; // console access for testing
+if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { game: Object.assign(ctx, { renderer }) }); // console access for testing
 
 const aim = { origin: new THREE.Vector3(), dir: new THREE.Vector3(), point: new THREE.Vector3(), target: null };
 const _tmp = new THREE.Vector3();
@@ -161,8 +184,8 @@ ctx.getAim = (range = 160, assistDeg = 6) => {
   camera.getWorldPosition(aim.origin);
   camera.getWorldDirection(aim.dir);
   const reach = range + player.curDist;
-  const t = city.world.raycastHit(aim.origin, aim.dir, reach);
-  aim.normal = t < reach ? city.world.hitNormal : null; // surface under the crosshair
+  const t = ctx.world.raycastHit(aim.origin, aim.dir, reach);
+  aim.normal = t < reach ? ctx.world.hitNormal : null; // surface under the crosshair
   aim.point.copy(aim.origin).addScaledVector(aim.dir, t);
   aim.target = enemies.findTarget(aim.origin, aim.dir, reach, Math.cos(THREE.MathUtils.degToRad(assistDeg)));
   if (aim.target) {
@@ -277,14 +300,21 @@ document.getElementById('play').addEventListener('click', () => {
   started = true;
   paused = false;
   input.active = true;
-  input.enterFullscreen();
-  input.lock();
+  input.capture();
   hud.message('PROTECT NEW YORK', 2.5);
 });
 const pauseEl = document.getElementById('pause');
-pauseEl.addEventListener('click', () => {
-  input.enterFullscreen();
-  input.lock();
+pauseEl.addEventListener('click', () => input.capture());
+// If the browser refuses to capture the mouse, pause so a click can try again (otherwise the game
+// would run with a free cursor that does nothing).
+document.addEventListener('pointerlockerror', () => {
+  if (!started || input.locked) return;
+  paused = true;
+  pauseEl.classList.remove('hidden');
+});
+// Any click on the game while the mouse isn't captured grabs it again.
+document.addEventListener('mousedown', (e) => {
+  if (started && !input.locked && !pauseEl.contains(e.target)) input.capture();
 });
 // Outside fullscreen Ctrl+W can't be blocked; at least ask before the tab closes.
 addEventListener('beforeunload', (e) => {
@@ -339,7 +369,7 @@ function frame() {
 
 // Soft contact shadows under the hero and every enemy, on whatever surface is below them.
 function updateBlobShadows() {
-  const w = city.world;
+  const w = ctx.world;
   blobs.begin();
   if (!player.dead) {
     const gy = w.groundY(player.pos.x, player.pos.z, player.pos.y + 0.5);
@@ -373,15 +403,21 @@ function tick(dt) {
   combat.update(dt);
   player.update(dt);
   powers.update(dt);
-  ctx.kaiju.update(dt, input);
-  ctx.impregno.update(dt, input);
-  ctx.aliens.update(dt, input);
-  ctx.eggs.update(dt, input);
-  ctx.watcher.update(dt, input);
-  enemies.update(dt);
-  city.update(dt, elapsed, player.pos);
-  ctx.impacts.update(dt);
-  ctx.destruction.update(dt);
+  // In the pocket dimension the city waits, frozen, until the hero comes back
+  if (!ctx.pocket.inside) {
+    ctx.kaiju.update(dt, input);
+    ctx.impregno.update(dt, input);
+    ctx.aliens.update(dt, input);
+    ctx.eggs.update(dt, input);
+    ctx.watcher.update(dt, input);
+    ctx.chargers.update(dt, input);
+    ctx.raptors.update(dt, input);
+    enemies.update(dt);
+    city.update(dt, elapsed, player.pos);
+    ctx.impacts.update(dt);
+    ctx.destruction.update(dt);
+  } else enemies.update(dt); // (in there enemies.list holds the squids)
+  ctx.pocket.update(dt);
   updateBlobShadows();
   fx.update(dt, renderer.domElement.height);
   sun.position.copy(player.pos).addScaledVector(sunDir, 300);

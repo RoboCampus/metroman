@@ -6,6 +6,9 @@ import { KAIJU_STATS } from './kaiju.js';
 import { IMPREGNO_STATS } from './impregno.js';
 import { ALIEN_STATS } from './alien.js';
 import { EGG_STATS } from './egg.js';
+import { CHARGER_STATS } from './charger.js';
+import { RAPTOR_STATS } from './raptor.js';
+import { SQUID_STATS } from './squid.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
@@ -37,6 +40,9 @@ const STATS = {
   impregno: IMPREGNO_STATS,
   alien: ALIEN_STATS,
   egg: EGG_STATS,
+  charger: CHARGER_STATS,
+  raptor: RAPTOR_STATS,
+  squid: SQUID_STATS,
 };
 
 const geo = {
@@ -210,7 +216,7 @@ export class Enemies {
     this.spawnT -= dt;
     if (this.spawnT <= 0) {
       this.spawnT = 1;
-      this.manageSpawns();
+      if (!this.ctx.pocket?.inside) this.manageSpawns(); // (the pocket dimension only has its squids)
     }
     const fx = this.ctx.fx;
     for (let i = this.list.length - 1; i >= 0; i--) {

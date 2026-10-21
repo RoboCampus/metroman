@@ -21,7 +21,8 @@ import { Kaiju } from './kaiju.js';
 //   Lift (sometimes, 23 s): like a watch visit, but he points at a building and the whole top half
 //     of it comes apart block by block. The blocks rise until they float 300 m above the building,
 //     then get pulled together into a single point, as if something were swallowing them, and
-//     the point is erased. (The building rebuilds itself a minute later.)
+//     the point is erased. (The building rebuilds itself a minute later.) Fly into that white point
+//     and you're pulled into his pocket dimension along with the blocks (pocket.js).
 // M summons a watch visit right away, N a kaiju show, B a building show, L a lift.
 
 const STORM = 5; // seconds of city-wide lightning
@@ -99,7 +100,7 @@ function barrierMaterial() {
       uniform float uTime; uniform float uK; uniform vec3 uHit; uniform float uHitK;
       varying vec3 vN; varying vec3 vV; varying vec3 vW;
       void main() {
-        float f = pow(1.0 - abs(dot(vN, vV)), 3.0);
+        float f = pow(clamp(1.0 - abs(dot(normalize(vN), normalize(vV))), 0.0, 1.0), 3.0); // (clamped: pow of a negative is NaN, which bloom smears into black squares)
         vec3 q = vW * 0.05;
         float arcs = abs(sin(q.x * 3.1 + sin(q.y * 2.3 + uTime * 3.0) * 2.0) * sin(q.z * 2.7 + sin(q.x * 1.7 - uTime * 2.0) * 2.0));
         float veins = smoothstep(0.9, 1.0, 1.0 - arcs);
@@ -112,7 +113,7 @@ function barrierMaterial() {
 }
 
 // One facade cell: stone wall with a tall window (every block of the created building wears it).
-function towerTexture() {
+export function towerTexture() {
   const c = document.createElement('canvas');
   c.width = c.height = 128;
   const g = c.getContext('2d');
@@ -387,6 +388,25 @@ export class Watcher {
       if (both) Object.assign(pose, { sL: aim, eL: 0, spread: 0.15 });
     }
     this.rig.pose(pose, 1 - Math.exp(-4 * dt), dt, null);
+  }
+
+  // ---------------------------------------------------------------- outside his visits
+  // For the pocket dimension's punishment (pocket.js): he stands centred on `pos`, facing `look`,
+  // faded in by `fade` (0 hides him).
+  showMan(pos, look, fade) {
+    const man = this.rig.root;
+    man.visible = fade > 0.002;
+    for (const m of this.mats) m.opacity = fade;
+    this.halo.material.opacity = 0.18 * fade;
+    this.light.intensity = 900 * fade;
+    (this.manPos ??= new THREE.Vector3()).copy(pos);
+    man.position.copy(pos);
+    man.position.y -= SCALE; // (rig origin is at the feet)
+    man.rotation.y = Math.atan2(-(look.x - pos.x), -(look.z - pos.z));
+  }
+
+  handPos(i, out) {
+    return this.rig.arms[i].hand.getWorldPosition(out);
   }
 
   // Too close: a blast of force throws the hero away from him, half the map, at 400 mph.
@@ -926,6 +946,11 @@ export class Watcher {
     // The point: grows as it swallows them, streams of light falling in
     L.orb.visible = pull > 0;
     L.orb.scale.setScalar(Math.max(0.01, 4 + 10 * pull + Math.sin(t * 40) * 0.8 * pull));
+    // Touch the white point and it takes you too: into his pocket dimension
+    if (L.orb.visible && this.ctx.pocket && _w.copy(player.pos).setY(player.pos.y + 1).distanceTo(L.point) < L.orb.scale.x + 2.5) {
+      this.ctx.pocket.enter(L.point);
+      return;
+    }
     if (pull > 0 && pull < 1) {
       for (let i = 0; i < 10; i++) {
         _w.set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize().multiplyScalar(40 + Math.random() * 60);
@@ -959,6 +984,7 @@ export class Watcher {
 
   endLift() {
     const L = this.lift;
+    this.ctx.pocket?.dump(L.pieces); // what he erases ends up in his pocket dimension
     for (const m of L.shells) {
       this.ctx.scene.remove(m);
       m.material.dispose();

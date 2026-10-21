@@ -49,7 +49,7 @@ function extrude(points, width, bevel) {
   return g;
 }
 
-function buildModel(name) {
+export function buildModel(name) {
   const t = TYPES[name === 'taxi' ? 'sedan' : name];
   const W = t.width, front = t.body[0][0], rear = t.body[t.body.length - 1][0];
   const body = [
@@ -78,7 +78,7 @@ function buildModel(name) {
   return { body: mergeGeometries(body), lights: mergeGeometries(lights) };
 }
 
-const PALETTE = ['#e8e8e8', '#1d1d1f', '#8a1c1c', '#1c3f8a', '#5a6068', '#b0b4b8', '#2f5a3a', '#6b1f3a'];
+export const PALETTE = ['#e8e8e8', '#1d1d1f', '#8a1c1c', '#1c3f8a', '#5a6068', '#b0b4b8', '#2f5a3a', '#6b1f3a'];
 const MIX = [['taxi', 0.45], ['sedan', 0.35], ['suv', 0.2]];
 // Cars further than FAR (Manhattan distance) from the player are recycled onto lanes within NEAR.
 const NEAR = 300, FAR = 650;

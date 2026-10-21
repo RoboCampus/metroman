@@ -1,0 +1,58 @@
+{
+  "fps": 30,
+  "clips": {
+    "g_stance": {
+      "loop": true
+    },
+    "g_jab1": {
+      "hit": [
+        7
+      ],
+      "cancel": 12,
+      "length": 18
+    },
+    "g_jab2": {
+      "hit": [
+        9
+      ],
+      "cancel": 15,
+      "length": 22
+    },
+    "g_jab3": {
+      "hit": [
+        10
+      ],
+      "cancel": 18,
+      "length": 26
+    },
+    "g_lunge": {
+      "hit": [
+        18
+      ],
+      "cancel": 26,
+      "length": 32,
+      "launch": 5
+    },
+    "a_jab1": {
+      "hit": [
+        7
+      ],
+      "cancel": 12,
+      "length": 18
+    },
+    "a_jab2": {
+      "hit": [
+        9
+      ],
+      "cancel": 15,
+      "length": 22
+    },
+    "a_jab3": {
+      "hit": [
+        10
+      ],
+      "cancel": 18,
+      "length": 26
+    }
+  }
+}

@@ -55,13 +55,23 @@ export class Input {
   }
 
   // Fullscreen + Keyboard Lock is the only way a page can receive Ctrl+W/T/N
-  // instead of the browser closing or opening tabs.
-  enterFullscreen() {
-    if (document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  // instead of the browser closing or opening tabs. then() runs once fullscreen is on (or failed).
+  enterFullscreen(then) {
+    if (document.fullscreenElement || !document.documentElement.requestFullscreen) return then?.();
     document.documentElement
       .requestFullscreen()
       .then(() => navigator.keyboard?.lock?.(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyT', 'KeyN', 'KeyR', 'KeyG']))
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => then?.());
+  }
+
+  // Capture the mouse (and enter fullscreen). The browser can refuse the mouse capture while it's
+  // switching to fullscreen, so ask again once that's done.
+  capture() {
+    this.lock();
+    this.enterFullscreen(() => {
+      if (!this.locked) this.lock();
+    });
   }
 
   down(code) { return this.keys.has(code); }

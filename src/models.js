@@ -17,7 +17,7 @@ import { createHumanoid } from './humanoid.js';
 const THREE_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/';
 export const MODEL_CONFIG = {
   hero: {
-    url: THREE_MODELS + 'Xbot.glb', height: 1.95, yaw: Math.PI,
+    url: 'assets/models/Xbot.glb', height: 1.95, yaw: Math.PI, combat: true,
     clips: { idle: 'idle', walk: 'walk', run: 'run' }, refSpeed: { walk: 1.6, run: 5.5 },
     tint: { Beta_Surface: 'suit', Beta_Joints: 'trim' },
   },
@@ -76,11 +76,50 @@ function measure(gltf) {
   return { hipY: hipY - foot, chestY: chestY - foot, height: top - foot, footY: foot, zMin, zMax };
 }
 
+// Hand-made combat animations for the hero (built in Blender by tools/blender/combat_anims.py) and
+// their timing: contact ("hit") frames and the frame the next attack may start ("cancel").
+const COMBAT_ANIMS = { url: 'assets/anims/hero_combat.glb', timing: 'assets/anims/hero_combat.json' };
+
+async function loadCombat(loader) {
+  try {
+    const [gltf, timing] = await Promise.all([
+      loader.loadAsync(COMBAT_ANIMS.url),
+      fetch(COMBAT_ANIMS.timing).then((r) => r.json()),
+    ]);
+    const fps = timing.fps || 30;
+    const clips = new Map(gltf.animations.map((c) => [c.name, c]));
+    const info = {};
+    for (const [name, t] of Object.entries(timing.clips)) {
+      if (!clips.has(name)) continue;
+      info[name] = {
+        loop: !!t.loop, hit: (t.hit || []).map((f) => f / fps),
+        cancel: t.cancel != null ? t.cancel / fps : clips.get(name).duration, length: clips.get(name).duration,
+        launch: (t.launch ?? 0) / fps, // moves that travel: when the hero takes off
+      };
+    }
+    // Air versions of the ground attacks (a_jab1 ... from g_jab1 ...), unless the file has its own:
+    // the same upper body (hips turn, spine, arms, head) without the legs or the hips' height, so
+    // in flight the legs keep their flying pose while the hero swings.
+    for (const name of Object.keys(info)) {
+      const air = 'a_' + name.slice(2);
+      if (!name.startsWith('g_') || info[name].loop || name === 'g_lunge' || clips.has(air)) continue;
+      const src = clips.get(name);
+      const tracks = src.tracks.filter((t) => !/(UpLeg|Leg|Foot|Toe)/.test(t.name) && !/Hips\.position$/.test(t.name));
+      clips.set(air, new THREE.AnimationClip(air, src.duration, tracks));
+      info[air] = { ...info[name], legsFree: true };
+    }
+    assets.combat = { clips, info };
+  } catch (err) {
+    console.warn('Combat animations unavailable, using procedural attack poses:', err.message);
+  }
+}
+
 // Load every configured model. Resolves to { hero: bool, thug: bool }; failures fall back to
 // the procedural characters, so the game still runs offline.
 export async function loadModels(timeoutMs = 20000) {
   const loader = new GLTFLoader();
   const result = {};
+  await loadCombat(loader);
   await Promise.all(Object.entries(MODEL_CONFIG).map(async ([kind, cfg]) => {
     try {
       const gltf = await Promise.race([
@@ -176,21 +215,55 @@ class ModelRig {
       const clip = gltf.animations.find((a) => a.name === name);
       if (clip) this.actions[key] = this.mixer.clipAction(clip);
     }
+    // Combat clips (hero only): attacks play once over everything; a fighting stance replaces the
+    // relaxed idle for a little while after each attack.
+    this.combat = cfg.combat ? assets.combat : null;
+    const stance = this.combat?.clips.get('g_stance');
+    if (stance) this.actions.stance = this.mixer.clipAction(stance);
+    this.oneShot = null;
+    this.combatT = 0;
     this.current = null;
     this.play('idle', 1);
     this.ps = { ...POSE_DEFAULTS };
     this.w = { armL: 0, armR: 0, legs: 0 };
   }
 
-  play(key, timeScale) {
+  play(key, timeScale, fade = 0.2) {
     const a = this.actions[key] || this.actions.idle;
     if (!a) return;
     if (this.current !== a) {
-      a.reset().fadeIn(0.2).play();
-      if (this.current) this.current.fadeOut(0.2);
+      a.reset().fadeIn(fade).play();
+      if (this.current) this.current.fadeOut(fade);
       this.current = a;
     }
     a.timeScale = timeScale;
+  }
+
+  // Timing of a combat clip in seconds ({ hit: [..], cancel, length }), or null if there's no such clip.
+  clipInfo(name) {
+    return this.combat?.info[name] ?? null;
+  }
+
+  // Play a combat clip once, crossfading in fast. Returns its timing (scaled by speed) or null.
+  attack(name, speed = 1) {
+    const clip = this.combat?.clips.get(name), info = this.clipInfo(name);
+    if (!clip || !info) return null;
+    const a = this.mixer.clipAction(clip);
+    a.reset();
+    a.setLoop(THREE.LoopOnce, 1);
+    a.clampWhenFinished = true;
+    a.timeScale = speed;
+    a.fadeIn(0.05).play();
+    if (this.current && this.current !== a) this.current.fadeOut(0.05);
+    this.current = a;
+    // legsFree (air attacks): the clip has no leg tracks, the procedural pose keeps posing the legs
+    this.oneShot = { action: a, t: 0, end: info.length / speed, legsFree: !!info.legsFree };
+    return { hit: info.hit.map((h) => h / speed), cancel: info.cancel / speed, length: info.length / speed, launch: info.launch / speed };
+  }
+
+  // Stop an attack clip early (knocked down, dodging...)
+  cancelAttack() {
+    this.oneShot = null;
   }
 
   // colors: [main/suit, trim, skin, hair, dark, alt]. look.glow / look.lines light up the trim.
@@ -214,20 +287,33 @@ class ModelRig {
   pose(p, k, dt, loco) {
     const ps = this.ps;
     for (const key in POSE_DEFAULTS) ps[key] += ((p[key] ?? POSE_DEFAULTS[key]) - ps[key]) * k;
-    const mask = loco ? loco.mask : 'all';
-    const kw = 1 - Math.exp(-12 * dt);
+    // An attack clip owns the whole body until it ends
+    if (this.oneShot) {
+      this.oneShot.t += dt;
+      if (this.oneShot.t >= this.oneShot.end) {
+        this.oneShot = null;
+        this.combatT = 2.5;
+      }
+    }
+    this.combatT -= dt;
+    const clipDriven = !!this.oneShot;
+    const mask = clipDriven ? (this.oneShot.legsFree ? 'legs' : 'none') : loco ? loco.mask : 'all';
+    const kw = 1 - Math.exp(-(clipDriven ? 30 : 12) * dt);
     const target = {
       armL: mask === 'all' || mask === 'arms' ? 1 : 0,
       armR: mask === 'all' || mask === 'arms' || mask === 'armR' ? 1 : 0,
-      legs: mask === 'all' ? 1 : 0,
+      legs: mask === 'all' || mask === 'legs' ? 1 : 0,
     };
     for (const c in target) this.w[c] += (target[c] - this.w[c]) * (dt > 0 ? kw : 1);
-    this.body.rotation.x = ps.tilt;
+    this.body.rotation.x = clipDriven ? 0 : ps.tilt;
 
-    if (loco && loco.clip !== 'idle') {
-      const ref = this.refSpeed[loco.clip] || 1;
-      this.play(loco.clip, THREE.MathUtils.clamp(loco.speed / ref, 0.5, 3));
-    } else this.play('idle', 1);
+    if (!clipDriven) {
+      const fade = this.current && this.current.getClip().name.startsWith('g_') ? 0.15 : 0.2;
+      if (loco && loco.clip !== 'idle') {
+        const ref = this.refSpeed[loco.clip] || 1;
+        this.play(loco.clip, THREE.MathUtils.clamp(loco.speed / ref, 0.5, 3), fade);
+      } else this.play(loco && this.combatT > 0 && this.actions.stance ? 'stance' : 'idle', 1, fade); // stance on the ground only
+    }
     this.mixer.update(dt);
     this.root.updateMatrixWorld(true);
     this.body.getWorldQuaternion(_bodyQ);

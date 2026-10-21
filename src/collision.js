@@ -211,7 +211,7 @@ export class World {
   }
 
   groundY(x, z, fromY = 600) {
-    const t = this.raycast({ x, y: fromY, z }, DOWN, fromY + 10);
+    const t = this.raycast({ x, y: fromY, z }, DOWN, fromY - this.floorAt(x, z) + 10); // (down to the floor, wherever it is)
     return fromY - t;
   }
 

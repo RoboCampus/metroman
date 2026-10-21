@@ -4,13 +4,13 @@ import { stride } from './humanoid.js';
 import { createRig } from './models.js';
 
 // Color presets per power. A "look" holds 4 colors (like DCUO's color palette),
-// plus body type, head style, emblem and cape.
+// plus body type, head style and emblem.
 export const PRESETS = {
   fire: { suit: '#7d1a12', trim: '#1b1a1f', cape: '#c43d0c', glow: '#ffae42' },
   electric: { suit: '#1a3a8a', trim: '#14151b', cape: '#13214a', glow: '#7fe3ff' },
 };
 export const DEFAULT_LOOK = {
-  name: 'Guardian', body: 'average', head: 'cowl', emblem: 'flame', cape: true,
+  name: 'Guardian', body: 'average', head: 'cowl', emblem: 'flame',
   pattern: 'panels', lines: true, skin: '#c98d6b', ...PRESETS.fire,
 };
 const BODY = { slim: [0.9, 0.98], average: [1, 1], muscular: [1.14, 1.02], large: [1.3, 1.05] };
@@ -28,6 +28,12 @@ const BREAKOUT_CD = 6;
 const DODGE_TIME = 0.3, DODGE_CD = 0.7, DODGE_BUFFER = 0.25;
 const DODGE_SPEED = { flight: 55, speed: 70 };
 const WALL_BREAK_SPEED = 250 / 3.6; // m/s into a wall needed to smash through it (250 km/h)
+// Superhero landing: hitting the ground falling faster than `fall` m/s, or flying into it faster
+// than `fly` m/s; knelt for `lock` s (no moving), then `rise` s getting up. `kick`: the flight
+// boost's kick-off (tucked for `tuck` s of it).
+const LAND = { fall: 38, fly: 40, time: 0.95, lock: 0.6, rise: 0.35 };
+const KICK = { time: 0.5, tuck: 0.14 };
+const mix = (a, b, t) => a + (b - a) * t;
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 
 export function drawEmblem(canvas, shape, fill, stroke) {
@@ -125,6 +131,11 @@ export class Player {
     this.blocking = false;
     this.downT = 0; // knocked down
     this.fall = 0; // 0..1 knockdown pose blend
+    this.landT = 0; // superhero landing (counts down from LAND.time)
+    this.land = 0; // 0..1 landing crouch blend
+    this.kickT = 0; // flight boost kick-off (a quick tuck, then thrust)
+    this.bank = 0; // flight lean into turns
+    this.prevFacing = 0;
     this.breakoutCd = 0;
     this.boHeld = 0;
     this.immuneT = 0; // brief immunity after a successful counter / breakout
@@ -154,17 +165,6 @@ export class Player {
     emblem.rotation.y = Math.PI;
     this.body.add(emblem);
 
-    // Cape flares from the shoulders toward the hem.
-    const capeGeo = new THREE.PlaneGeometry(0.5, 1.15, 4, 10).translate(0, -0.575, 0);
-    const cp = capeGeo.attributes.position;
-    for (let i = 0; i < cp.count; i++) cp.setX(i, cp.getX(i) * (1 + (-cp.getY(i) / 1.15) * 0.35));
-    this.capeRest = cp.array.slice();
-    this.capeMat = new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, roughness: 0.65, metalness: 0.05 });
-    this.cape = new THREE.Mesh(capeGeo, this.capeMat);
-    this.cape.position.set(0, rig.capeAnchor.y, rig.capeAnchor.z);
-    this.cape.castShadow = true;
-    this.body.add(this.cape);
-
     this.shield = new THREE.Mesh(new THREE.SphereGeometry(1.25, 24, 16), new THREE.MeshBasicMaterial({
       transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
     }));
@@ -182,12 +182,10 @@ export class Player {
       rig.glowMat.emissive.set(L.glow);
     }
     for (const m of rig.lines) m.visible = !!L.lines;
-    this.capeMat.color.set(L.cape);
     this.shield.material.color.set(L.glow);
     drawEmblem(this.emblemCanvas, L.emblem, L.glow, L.trim);
     this.emblemTex.needsUpdate = true;
     for (const [k, g] of Object.entries(this.heads)) g.visible = k === L.head;
-    this.cape.visible = !!L.cape;
     const [w, h] = BODY[L.body] || BODY.average;
     this.body.scale.set(w, h, w);
   }
@@ -218,12 +216,20 @@ export class Player {
   cast() { this.castT = 0.6; }
   addSuper(a) { this.super = Math.min(100, this.super + a); }
 
-  attack(kind, dur, facing, side = 1) {
-    this.atk = { kind, dur, t: 0, facing, side };
+  // Start an attack. With `clip` (a ground combat animation, g_...) the model plays it; in the air
+  // the matching air version (a_..., upper body only, legs keep the flying pose) is used instead,
+  // unless anyHeight says the clip itself works anywhere. Returns the clip's timing ({ hit: [s],
+  // cancel, length, launch }), or null when there's no animation (the procedural pose for `kind`).
+  attack(kind, dur, facing, side = 1, clip = null, anyHeight = false, speed = 1) {
+    let name = clip;
+    if (clip && !this.grounded && !anyHeight) name = 'a_' + clip.slice(2);
+    const info = name && this.rig.clipInfo?.(name) ? this.rig.attack(name, speed) : null;
+    this.atk = { kind, dur: info ? info.length : dur, t: 0, facing, side, clip: info ? name : null };
+    return info;
   }
 
   lunge(dir, speed, t) {
-    this.lungeVel.copy(dir).multiplyScalar(Math.min(speed, 80));
+    this.lungeVel.copy(dir).multiplyScalar(Math.min(speed, 300));
     this.lungeT = t;
     this.wallRun = false;
   }
@@ -276,6 +282,7 @@ export class Player {
     this.blocking = false;
     this.lungeT = 0;
     this.atk = null;
+    this.rig.cancelAttack?.();
     this.vel.y = Math.max(this.vel.y, 6);
     this.ctx.hud.callout(this.breakoutCd <= 0 ? `${label} · HOLD CTRL TO BREAK OUT` : label, 'bad');
   }
@@ -310,7 +317,7 @@ export class Player {
     this.dead = false;
     this.hp = this.maxHp;
     this.power = this.maxPower;
-    this.pos.copy(this.spawn);
+    this.pos.copy(this.ctx.pocket?.inside ? this.ctx.pocket.respawnPoint() : this.spawn); // (dying in the pocket dimension keeps you there)
     this.vel.set(0, 0, 0);
     this.root.visible = true;
     this.ctx.hud.message('BACK IN ACTION', 1.5);
@@ -360,6 +367,7 @@ export class Player {
       this.lungeT -= dt;
       lungeEnded = this.lungeT <= 0;
     } else if (this.dodgeT > 0) this.moveDodge(dt);
+    else if (this.landT > LAND.time - LAND.lock) this.moveLanded(dt);
     else if (this.movement === 'flight') this.moveFlight(dt, inp);
     else this.moveSpeed(dt, inp);
     this.integrate(dt);
@@ -372,7 +380,10 @@ export class Player {
     this.wasShift = shift;
     this.sprinting = shift; // lightning keeps going for as long as Shift is held
     const boost = this.boostKey(inp) && this.movement === 'flight' && !this.blocking;
-    if (boost && !this.wasBoost) this.boostWave();
+    if (boost && !this.wasBoost) {
+      this.boostWave();
+      if (!this.grounded) this.kickT = KICK.time;
+    }
     this.wasBoost = boost;
     this.trails(dt);
     this.updateCamera(dt);
@@ -404,6 +415,7 @@ export class Player {
     this.dodgeT = 0;
     this.lungeT = 0;
     this.atk = null;
+    this.rig.cancelAttack?.();
   }
 
   // Shift (super speed sprint / flight boost), unless a warden egg's cage has the hero locked down.
@@ -450,6 +462,10 @@ export class Player {
     this.blocking = false;
     this.lungeT = 0;
     this.facing = this.yaw;
+    if (this.atk?.clip) {
+      this.atk = null; // a dodge cuts an attack animation short
+      this.rig.cancelAttack?.();
+    }
     const [c0, c1] = this.trailColors();
     _v.copy(this.pos);
     _v.y += 1;
@@ -465,6 +481,16 @@ export class Player {
     else this.vel.y -= GRAVITY * dt;
     this.dodgeT -= dt;
     if (this.dodgeT <= 0) this.vel.addScaledVector(this.dodgeDir, -v * 0.6);
+  }
+
+  // Knelt after a superhero landing: skid to a stop.
+  moveLanded(dt) {
+    const f = Math.exp(-14 * dt);
+    this.vel.x *= f;
+    this.vel.z *= f;
+    if (this.movement === 'flight') this.vel.y = Math.min(this.vel.y, 0);
+    else this.vel.y -= GRAVITY * dt;
+    this.wallRun = false;
   }
 
   moveFlight(dt, inp) {
@@ -523,7 +549,7 @@ export class Player {
 
   integrate(dt) {
     const world = this.ctx.world;
-    const vy0 = this.vel.y;
+    const vy0 = this.vel.y, sp0 = this.vel.length();
     const steps = Math.max(1, Math.ceil((this.vel.length() * dt) / 0.5));
     const sdt = dt / steps;
     let ground = false, slam = 0;
@@ -544,11 +570,20 @@ export class Player {
       const n = this.wallN, at = _v2.set(this.pos.x - n.x * (this.radius + 0.6), this.pos.y + 1.2, this.pos.z - n.y * (this.radius + 0.6));
       if (this.ctx.destruction.damage(at.clone(), 1.5 + slam / 35, _v3.set(-n.x, 0, -n.y))) this.ctx.combat?.hitstop(0.06);
     }
-    if (ground && !this.grounded && vy0 < -38) {
-      // Hard landing shockwave
-      this.ctx.fx.ring(this.pos, this.look.glow, 8, 0.4);
-      this.ctx.fx.burst(_v.copy(this.pos).setY(this.pos.y + 0.3), 40, { speed: 12, life: 0.5, size: 1.2, c0: [0.7, 0.65, 0.6], c1: [0.2, 0.2, 0.2], drag: 3 });
-      this.shake(0.35, 0.3);
+    const hard = vy0 < -LAND.fall || (this.movement === 'flight' && sp0 > LAND.fly && vy0 < -10);
+    if (ground && !this.grounded && hard) {
+      // Superhero landing: one knee and a fist into the ground, shock wave and dust
+      const fx = this.ctx.fx, k = Math.min(1, sp0 / FLY_BOOST);
+      fx.ring(this.pos, this.look.glow, 8 + 8 * k, 0.45);
+      fx.ring(this.pos, 0xd8d0c0, 5 + 5 * k, 0.3);
+      fx.burst(_v.copy(this.pos).setY(this.pos.y + 0.3), 40 + 30 * k, { speed: 12 + 10 * k, life: 0.6, size: 1.2 + 0.4 * k, c0: [0.7, 0.65, 0.6], c1: [0.2, 0.2, 0.2], drag: 3 });
+      fx.flash(_v, this.look.glow, 30 + 50 * k, 20, 0.15);
+      this.shake(0.35 + 0.4 * k, 0.35);
+      if (this.landT <= 0 && this.launchT <= 0 && this.dodgeT <= 0 && !this.atk && !this.dead) {
+        this.landT = LAND.time;
+        this.kickT = 0;
+        this.facing = Math.hypot(this.vel.x, this.vel.z) > 1 ? Math.atan2(-this.vel.x, -this.vel.z) : this.facing;
+      }
     }
     this.grounded = ground;
     this.pos.x = clamp(this.pos.x, -2400, 2400);
@@ -574,38 +609,29 @@ export class Player {
     this.root.rotation.y = this.facing;
 
     // Pose for this frame (see humanoid.js for rotation conventions).
-    let p, capeLift = 0;
+    let p;
     if (this.wallRun) {
       this.anim += dt * 22;
       p = { ...stride(this.anim, 1.1, 1.2), tilt: 1.35 };
-      capeLift = 0.3;
     } else if (this.movement === 'flight' && !this.grounded) {
-      const fct = clamp((this.speed - 6) / 22, 0, 1);
-      const vp = Math.atan2(this.vel.y, hs);
-      this.anim += dt * 2;
-      const sway = Math.sin(this.anim) * 0.15 * (1 - fct);
-      p = {
-        tilt: -(Math.PI / 2 - vp) * fct, // align body with velocity: superhero pose
-        sR: Math.PI * 0.95 * fct + (1 - fct) * 0.25, eR: 0.1 * fct + 0.4 * (1 - fct),
-        sL: 0.15 * (1 - fct), eL: 0.3,
-        hL: 0.1 + sway, kL: -0.15 - 0.3 * (1 - fct),
-        hR: 0.3 * (1 - fct) + 0.05, kR: -0.1 - 0.4 * (1 - fct),
-        spread: 0.12 + 0.2 * (1 - fct),
-      };
-      capeLift = 0.15 * (1 - fct);
+      p = this.flightPose(dt, hs);
     } else if (!this.grounded) {
       p = { tilt: -0.2, hL: 0.6, kL: -1.0, hR: -0.3, kR: -0.4, sL: -0.5, sR: 0.5, eL: 0.8, eR: 0.8 };
-      capeLift = clamp(hs / 40, 0, 1.1) + 0.2;
     } else if (hs > 0.8) {
       const fast = hs > 20;
       this.anim += dt * Math.min(28, 4 + hs * 0.9);
       p = { ...stride(this.anim, fast ? 1.25 : 0.4 + hs * 0.05, fast ? 1.6 : 0.5), tilt: fast ? -0.55 : -0.08 };
-      capeLift = clamp(hs / 30, 0, 1.3);
     } else {
       this.anim += dt * 2;
       const b = Math.sin(this.anim) * 0.04;
       p = { sL: b, sR: b, spread: 0.16 };
     }
+    // Superhero landing: down on the right knee, right fist on the ground, left arm thrown back,
+    // head down; then getting up (the walk/idle clips take over again)
+    this.landT = Math.max(0, this.landT - dt);
+    const knelt = this.landT > LAND.rise;
+    this.land += ((knelt ? 1 : 0) - this.land) * (knelt ? 1 : 1 - Math.exp(-9 * dt));
+    if (knelt) p = { tilt: -0.55, sR: 0.75, eR: 0.1, sL: -0.7, eL: 0.35, spread: 0.45, hL: 1.85, kL: -1.85, hR: 0.45, kR: -2.0 };
     if (this.castT > 0) {
       p.sR = Math.PI / 2 + this.pitch - (p.tilt ?? 0); // point at the crosshair
       p.eR = 0;
@@ -622,7 +648,9 @@ export class Player {
       a.t += dt;
       const ph = Math.min(1, a.t / a.dur), s = Math.sin(Math.PI * ph);
       fast = true;
-      if (a.kind === 'jab') {
+      if (a.clip) {
+        // the animation clip drives the body (models.js); nothing to pose here
+      } else if (a.kind === 'jab') {
         // Guard up, punching arm extends at the peak
         Object.assign(p, { sL: 1.1, eL: 1.6, sR: 1.1, eR: 1.6, tilt: -0.15 * s });
         if (a.side > 0) Object.assign(p, { sR: 0.4 + s * 1.2, eR: 1.6 * (1 - s) });
@@ -647,21 +675,26 @@ export class Player {
       // Tucked for the roll/flip
       p = { sL: 0.9, sR: 0.9, eL: 1.4, eR: 1.4, hL: 1.3, hR: 1.3, kL: -1.8, kR: -1.8 };
       fast = true;
-      capeLift = 0.6;
     }
 
     // On the ground with nothing else going on, a model rig plays its walk/run/idle clips
     // (the pose's stride is only used by the procedural rig). Casting still aims the right arm.
-    const free = this.grounded && !this.wallRun && !this.atk && !this.blocking && this.dodgeT <= 0 && this.fall <= 0.01;
+    const free = this.grounded && !this.wallRun && !this.atk && !this.blocking && this.dodgeT <= 0 && this.fall <= 0.01 && !knelt;
     const loco = free
       ? { clip: hs > 6 ? 'run' : hs > 0.8 ? 'walk' : 'idle', speed: hs, mask: this.castT > 0 ? 'armR' : null }
       : null;
-    this.rig.pose(p, this.dodgeT > 0 ? 1 : 1 - Math.exp(-(fast ? 30 : 14) * dt), dt, loco);
+    const snap = this.dodgeT > 0 || this.landT > LAND.time - 0.05; // (hits the landing pose at once)
+    this.rig.pose(p, snap ? 1 : 1 - Math.exp(-(fast || this.kickT > 0 ? 30 : 14) * dt), dt, loco);
 
     // Dodge: barrel roll (left/right) or somersault (front/back); knockdown: fall onto the back.
-    this.spin.rotation.set(this.fall * 1.45, 0, 0);
-    if (this.launchT > 0) this.spin.rotation.x = this.tumble; // tumbling head over heels
-    this.spin.position.y = this.rig.hipY * (1 - this.fall * 0.65);
+    // Flying: leaning into turns.
+    const flying = this.movement === 'flight' && !this.grounded && !this.wallRun;
+    this.spin.rotation.set(this.fall * 1.45, 0, this.bank);
+    if (this.launchT > 0 && this.launchVel.lengthSq() > 1) this.spin.rotation.x = this.tumble; // tumbling head over heels (not while held)
+    this.spin.position.y = this.rig.hipY * (1 - this.fall * 0.65 - this.land * 0.5);
+    if (!flying) this.bank *= Math.exp(-8 * dt);
+    this.kickT = flying ? Math.max(0, this.kickT - dt) : 0;
+    this.prevFacing = this.facing;
     if (this.dodgeT > 0) {
       const a = (1 - this.dodgeT / DODGE_TIME) * Math.PI * 2 * this.dodgeSign;
       if (this.dodgeKind === 'roll') this.spin.rotation.z = -a;
@@ -673,17 +706,43 @@ export class Player {
       this.shield.material.opacity = this.shieldT > 0 ? 0.5 : 0.18 + Math.sin(performance.now() / 120) * 0.04;
     }
 
-    const pos = this.cape.geometry.attributes.position, rest = this.capeRest;
-    const time = performance.now() / 1000;
-    const flutter = 0.03 + (Math.min(this.speed, 60) / 60) * 0.12;
-    for (let i = 0; i < pos.count; i++) {
-      const x = rest[i * 3], y = rest[i * 3 + 1], s = -y / 1.25;
-      pos.setZ(i, s * s * capeLift * 0.9 + Math.sin(time * 14 + s * 5 + x * 3) * flutter * s);
-      pos.setY(i, y + s * s * capeLift * 0.35);
-    }
-    pos.needsUpdate = true;
-    this.cape.geometry.computeVertexNormals();
     this.root.updateMatrixWorld(true);
+  }
+
+  // The flying pose, blended by speed:
+  //   hovering – upright, legs dangling with the right knee drawn up, arms loose, bobbing gently;
+  //   cruising – body along the flight path, right fist out in front, left arm along the side,
+  //              left leg straight back, right knee bent, legs fluttering a little;
+  //   boosting (Shift) – streamlined: both fists forward, legs locked together, a slight shudder.
+  // Pressing Shift kicks off with a quick tuck (knees and arms pulled in) before the thrust.
+  flightPose(dt, hs) {
+    const cruise = clamp((this.speed - 6) / 22, 0, 1);
+    const boost = clamp((this.speed - FLY_SPEED - 8) / 40, 0, 1);
+    this.anim += dt * (2 + 6 * cruise);
+    const bob = Math.sin(this.anim) * (1 - cruise), flutter = Math.sin(this.anim * 1.3) * 0.08 * cruise * (1 - boost);
+    const shudder = boost * (Math.random() - 0.5) * 0.03;
+    const vp = Math.atan2(this.vel.y, hs);
+    // Lean into turns (left side down turning left)
+    const turn = clamp(-Math.atan2(Math.sin(this.prevFacing - this.facing), Math.cos(this.prevFacing - this.facing)) / Math.max(dt, 1e-3), -6, 6);
+    this.bank +=(clamp(turn * 0.22 * cruise, -0.8, 0.8) - this.bank) * (1 - Math.exp(-6 * dt));
+    // Dropping straight down (not boosting) goes feet first, ready to land
+    const drop = clamp((-vp - 1.0) / 0.4, 0, 1) * (1 - boost), limbs = cruise * (1 - drop);
+    const pose = {
+      tilt: mix(-0.08 + bob * 0.03, mix(-(Math.PI / 2 - vp), -0.2, drop), cruise) + shudder, // body along the velocity
+      sR: mix(0.3, Math.PI * 0.97, limbs), eR: mix(0.5, 0.05, limbs),
+      sL: mix(0.15, mix(-0.12, Math.PI * 0.97, boost), limbs), eL: mix(0.45, mix(0.3, 0.05, boost), limbs),
+      spread: mix(0.32, mix(0.1, -0.07, boost), limbs),
+      hL: mix(0.12 + bob * 0.08, flutter, limbs), kL: mix(-0.35, -0.04, limbs),
+      hR: mix(0.75 + bob * 0.06, mix(0.3 - flutter, 0.02, boost), limbs), kR: mix(-1.15, mix(-0.75, -0.04, boost), limbs),
+    };
+    // The boost kick: tucked tight for a moment, then shooting out straight
+    const kick = this.kickT > 0 ? 1 - this.kickT / KICK.time : 1;
+    const tuck = kick < 1 ? Math.sin(Math.PI * Math.min(1, kick / (KICK.tuck / KICK.time * 2))) : 0;
+    if (tuck > 0) {
+      const T = { sL: 0.9, sR: 0.9, eL: 1.9, eR: 1.9, spread: -0.2, hL: 1.3, hR: 1.3, kL: -2.0, kR: -2.0 };
+      for (const key in T) pose[key] = mix(pose[key], T[key], tuck);
+    }
+    return pose;
   }
 
   trails(dt) {

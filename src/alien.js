@@ -44,38 +44,46 @@ const mats = {
   glow: new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 0.15, 0.1), transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide }),
 };
 
+// The sphere's model, scaled to full size (also used for the wrecks in the Watcher's pocket dimension).
+export function alienModel() {
+  const root = new THREE.Group();
+  const body = new THREE.Mesh(geo.body, new THREE.MeshStandardMaterial({ color: '#8d9299', roughness: 0.28, metalness: 0.92, emissive: '#ffffff', emissiveIntensity: 0 }));
+  body.castShadow = true;
+  root.add(body);
+  // Panel bands, the eye on the front (-Z), a spinning ring around the equator, little fins
+  for (const [rx, ry] of [[Math.PI / 2, 0], [0, 0], [0, Math.PI / 2]]) {
+    const b = new THREE.Mesh(geo.band, mats.band);
+    b.rotation.set(rx, ry, 0);
+    root.add(b);
+  }
+  const socket = new THREE.Mesh(geo.socket, mats.socket);
+  socket.position.z = -BASE * 0.82;
+  const eyeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.5, 0.08, 0.05), toneMapped: false });
+  const eye = new THREE.Mesh(geo.eye, eyeMat);
+  eye.position.z = -BASE * 0.93;
+  root.add(socket, eye);
+  const ring = new THREE.Mesh(geo.ring, mats.ring);
+  ring.rotation.x = Math.PI / 2;
+  for (let i = 0; i < 6; i++) {
+    const f = new THREE.Mesh(geo.fin, mats.ring);
+    const a = (i / 6) * Math.PI * 2;
+    f.position.set(Math.cos(a) * BASE * 1.25, Math.sin(a) * BASE * 1.25, 0);
+    f.rotation.z = a;
+    ring.add(f);
+  }
+  root.add(ring);
+  root.scale.setScalar(RADIUS / BASE);
+  return { root, body, eye, eyeMat, ring };
+}
+
 export class AlienSphere {
   // i: its place in the wave (staggers the break-outs and first shots so they don't all go at once)
   constructor(ctx, group, at, i = 0) {
     this.ctx = ctx;
-    const root = new THREE.Group();
-    const body = new THREE.Mesh(geo.body, new THREE.MeshStandardMaterial({ color: '#8d9299', roughness: 0.28, metalness: 0.92, emissive: '#ffffff', emissiveIntensity: 0 }));
-    body.castShadow = true;
-    root.add(body);
-    // Panel bands, the eye on the front (-Z), a spinning ring around the equator, little fins
-    for (const [rx, ry] of [[Math.PI / 2, 0], [0, 0], [0, Math.PI / 2]]) {
-      const b = new THREE.Mesh(geo.band, mats.band);
-      b.rotation.set(rx, ry, 0);
-      root.add(b);
-    }
-    const socket = new THREE.Mesh(geo.socket, mats.socket);
-    socket.position.z = -BASE * 0.82;
-    this.eyeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.5, 0.08, 0.05), toneMapped: false });
-    const eye = new THREE.Mesh(geo.eye, this.eyeMat);
-    eye.position.z = -BASE * 0.93;
-    root.add(socket, eye);
+    const { root, body, eye, eyeMat, ring } = alienModel();
+    this.eyeMat = eyeMat;
     this.eye = eye;
-    this.ring = new THREE.Mesh(geo.ring, mats.ring);
-    this.ring.rotation.x = Math.PI / 2;
-    for (let i = 0; i < 6; i++) {
-      const f = new THREE.Mesh(geo.fin, mats.ring);
-      const a = (i / 6) * Math.PI * 2;
-      f.position.set(Math.cos(a) * BASE * 1.25, Math.sin(a) * BASE * 1.25, 0);
-      f.rotation.z = a;
-      this.ring.add(f);
-    }
-    root.add(this.ring);
-    root.scale.setScalar(RADIUS / BASE);
+    this.ring = ring;
     // Aiming laser and the real laser
     this.aimLine = new THREE.Mesh(geo.beam, mats.aim);
     this.beam = new THREE.Group();

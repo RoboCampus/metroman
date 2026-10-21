@@ -138,7 +138,7 @@ export class HUD {
     this.zoneT -= dt;
     if (this.zoneT <= 0) {
       this.zoneT = 0.3;
-      this.zone.textContent = this.city.zoneName(p.pos.x, p.pos.z);
+      this.zone.textContent = ctx.pocket?.inside ? 'POCKET DIMENSION' : this.city.zoneName(p.pos.x, p.pos.z);
     }
     if (this.msgT > 0) {
       this.msgT -= dt;

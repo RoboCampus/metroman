@@ -132,6 +132,7 @@ export class Destruction {
   // ------------------------------------------------------------------ damage
   // Knock blocks out of any building within radius of point. Returns blocks removed.
   damage(point, radius, push = null) {
+    if (this.ctx.pocket?.inside) return this.ctx.pocket.damage(point, radius, push); // (its ruins break instead)
     const world = this.ctx.world;
     const groups = new Set();
     for (const b of world.query(point.x - radius, point.z - radius, point.x + radius, point.z + radius)) {
