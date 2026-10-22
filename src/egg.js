@@ -387,9 +387,10 @@ export class EggSpawner {
       return false;
     });
     this.updateFrost(dt);
-    if (this.enabled === false) return; // switched off (main.js)
-    this.timer -= dt;
-    if (input?.hit('KeyO') || this.timer <= 0) {
+    // Switched off (main.js): no eggs on the timer, but the key still summons one
+    const auto = this.enabled !== false;
+    if (auto) this.timer -= dt;
+    if (input?.hit('KeyO') || (auto && this.timer <= 0)) {
       this.spawn();
       if (this.timer <= 0) this.timer = SPAWN_EVERY;
     }

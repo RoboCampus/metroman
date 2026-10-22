@@ -165,7 +165,7 @@ ctx.kaiju = new KaijuSpawner(ctx); // building-sized boss (K summons it)
 ctx.impregno = new ImpregnoSpawner(ctx); // flying mayo boss (I summons him)
 ctx.aliens = new AlienSpawner(ctx, city.destructible.groups); // alien spheres break out of buildings (U summons a wave)
 ctx.eggs = new EggSpawner(ctx); // warden eggs come through rifts and cage the hero (O summons one)
-// Temporarily disabled (no spawns, their keys do nothing): delete a name here to bring it back.
+// No spawns on their own (their keys K / I / U / O still summon them): delete a name here to bring them back.
 // For the kaiju vs Impregno Man battle see bossfight.js.
 for (const s of [ctx.kaiju, ctx.impregno, ctx.aliens, ctx.eggs]) s.enabled = false;
 ctx.chargers = new ChargerSpawner(ctx); // bruisers that charge and launch the hero (J summons one)

@@ -466,9 +466,10 @@ export class AlienSpawner {
       a.dispose();
       return false;
     });
-    if (this.enabled === false) return; // switched off (main.js)
-    this.timer -= dt;
-    if (input?.hit('KeyU') || this.timer <= 0) this.timer = this.spawn() ? SPAWN_EVERY : 5;
+    // Switched off (main.js): no waves on the timer, but the key still summons one
+    const auto = this.enabled !== false;
+    if (auto) this.timer -= dt;
+    if (input?.hit('KeyU') || (auto && this.timer <= 0)) this.timer = this.spawn() ? SPAWN_EVERY : 5;
   }
 }
 

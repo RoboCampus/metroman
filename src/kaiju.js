@@ -950,15 +950,16 @@ export class KaijuSpawner {
   }
 
   update(dt, input) {
-    if (this.enabled === false && !this.current) return; // switched off (main.js)
     if (this.current && !this.ctx.enemies.list.includes(this.current.e)) {
       this.current.dispose();
       this.current = null;
       this.timer = RESPAWN;
     }
     if (this.current) return;
-    this.timer -= dt;
-    if (input?.hit('KeyK') || this.timer <= 0) {
+    // Switched off (main.js): no spawns on the timer, but the key still summons one
+    const auto = this.enabled !== false;
+    if (auto) this.timer -= dt;
+    if (input?.hit('KeyK') || (auto && this.timer <= 0)) {
       if (!this.summon()) this.timer = 5;
     }
   }

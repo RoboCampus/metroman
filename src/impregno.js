@@ -931,15 +931,16 @@ export class ImpregnoSpawner {
     this.ctx.mayo.update(dt);
     this.ctx.mayoCoat.update(dt);
     this.ctx.mayoFloods = this.ctx.mayoFloods.filter((f) => f.update(dt));
-    if (this.enabled === false && !this.current) return; // switched off (main.js)
     if (this.current && !this.ctx.enemies.list.includes(this.current.e)) {
       this.current.dispose();
       this.current = null;
       this.timer = RESPAWN;
     }
     if (this.current) return;
-    this.timer -= dt;
-    if (input?.hit('KeyI') || this.timer <= 0) this.summon();
+    // Switched off (main.js): no spawns on the timer, but the key still summons one
+    const auto = this.enabled !== false;
+    if (auto) this.timer -= dt;
+    if (input?.hit('KeyI') || (auto && this.timer <= 0)) this.summon();
   }
 }
 
