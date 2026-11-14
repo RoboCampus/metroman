@@ -1,4 +1,5 @@
-// Tiny zero-dependency static server: `npm start` then open http://localhost:5173
+// Tiny zero-dependency static server: `npm start` then open http://localhost:5172
+// (on a host like Railway it listens on the PORT it's given)
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,23 +20,38 @@ const types = {
 
 http
   .createServer((req, res) => {
-    let p = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    let p;
+    try {
+      p = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    } catch {
+      res.writeHead(400);
+      return res.end();
+    }
     if (p === '/') p = '/index.html';
     const file = path.join(root, p);
-    if (!file.startsWith(root)) {
+    if (!file.startsWith(root + path.sep)) {
       res.writeHead(403);
       return res.end();
     }
-    fs.readFile(file, (err, data) => {
-      if (err) {
+    fs.stat(file, (err, st) => {
+      if (err || !st.isFile()) {
         res.writeHead(404);
         return res.end('Not found');
       }
-      res.writeHead(200, {
+      // Browsers re-check every file on load (no-cache) but only download what changed (ETag)
+      const etag = `"${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+      const headers = {
         'Content-Type': types[path.extname(file)] || 'application/octet-stream',
         'Cache-Control': 'no-cache',
-      });
-      res.end(data);
+        ETag: etag,
+      };
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, headers);
+        return res.end();
+      }
+      res.writeHead(200, { ...headers, 'Content-Length': st.size });
+      if (req.method === 'HEAD') return res.end();
+      fs.createReadStream(file).pipe(res);
     });
   })
   .listen(port, () => console.log(`Metro Guardian running at http://localhost:${port}`));
