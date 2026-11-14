@@ -23,6 +23,8 @@ const GRAVITY = 34;
 const BLOCK_MOVE = 0.3; // movement speed multiplier while blocking
 const CAGED_MOVE = 0.25; // inside a warden egg's freezing cage: too slow to sidestep a laser, dodge instead
 const BREAKOUT_CD = 6;
+// Breakout (hold Ctrl `hold` s): costs `power`; from a launch only once it's `launch` s old
+const BREAKOUT = { power: 25, launch: 2, hold: 0.12 };
 // Dodge: while blocking (hold Left Ctrl), tap a direction. Short burst with invulnerability, then a cooldown.
 // A tap during the cooldown is buffered briefly so chained dodges don't get dropped.
 const DODGE_TIME = 0.3, DODGE_CD = 0.7, DODGE_BUFFER = 0.25;
@@ -106,6 +108,7 @@ export class Player {
     this.respawnT = 0;
     this.sinceHurt = 10;
     this.castT = 0;
+    this.chargePose = null; // 'charge' | 'beam' while charging a shot / firing the beam (powers.js)
     this.camDist = 7;
     this.curDist = 7;
     this.shakeT = 0;
@@ -121,6 +124,8 @@ export class Player {
     this.dodgeSign = 1;
     this.caged = 0; // > 0 while held in a warden egg's cage (no boost)
     this.launchT = 0; // > 0 while thrown through the air (controls do nothing)
+    this.launchAge = 0; // seconds into the current launch
+    this.launchShield = false; // launched through a block: the shield stays up while Ctrl is held
     this.launchVel = new THREE.Vector3();
     this.launchStuck = 0;
     this.tumble = 0;
@@ -284,12 +289,40 @@ export class Player {
     this.atk = null;
     this.rig.cancelAttack?.();
     this.vel.y = Math.max(this.vel.y, 6);
-    this.ctx.hud.callout(this.breakoutCd <= 0 ? `${label} · HOLD CTRL TO BREAK OUT` : label, 'bad');
+    this.ctx.hud.callout(this.breakoutCd <= 0 && this.power >= BREAKOUT.power ? `${label} · HOLD CTRL TO BREAK OUT` : label, 'bad');
+  }
+
+  // Holding Ctrl breaks out (knocked down, or launched for BREAKOUT.launch s), off cooldown and for
+  // BREAKOUT.power power. True when it happens.
+  holdBreakout(dt, inp) {
+    if (!inp.down('ControlLeft') || this.breakoutCd > 0) {
+      this.boHeld = 0;
+      this.boWarned = false;
+      return false;
+    }
+    if (this.power < BREAKOUT.power) {
+      if (!this.boWarned) this.ctx.hud.message('NOT ENOUGH POWER TO BREAK OUT', 0.8);
+      this.boWarned = true;
+      return false;
+    }
+    this.boHeld += dt;
+    if (this.boHeld < BREAKOUT.hold) return false;
+    this.breakout();
+    return true;
   }
 
   breakout() {
     this.downT = 0;
     this.boHeld = 0;
+    this.power -= BREAKOUT.power;
+    if (this.launchT > 0) {
+      // Out of the launch: stopped dead in the air, back in control
+      this.launchT = 0;
+      this.launchShield = false;
+      this.blocking = false;
+      this.vel.copy(this.launchVel).multiplyScalar(0.1);
+      this.tumble = 0;
+    }
     this.breakoutCd = BREAKOUT_CD;
     this.immuneT = 0.8;
     const [c0, c1] = this.trailColors();
@@ -343,19 +376,26 @@ export class Player {
       return;
     }
     // Chaining hits raises power regen (DCUO's hit counter).
-    this.power = Math.min(this.maxPower, this.power + (9 + Math.min(this.ctx.combat.hits, 25) * 0.6) * dt);
+    if (!this.chargePose) this.power = Math.min(this.maxPower, this.power + (9 + Math.min(this.ctx.combat.hits, 25) * 0.6) * dt); // (none while charging a shot or firing the beam)
     if (this.sinceHurt > 4) this.hp = Math.min(this.maxHp, this.hp + 18 * dt);
 
     if (this.downT > 0) {
       this.updateDown(dt, inp);
       return;
     }
-    this.blocking = inp.down('ControlLeft') && this.dodgeT <= 0 && this.launchT <= 0;
+    if (this.launchT <= 0 || !inp.down('ControlLeft')) this.launchShield = false; // once let go, it's gone for the flight
+    this.blocking = inp.down('ControlLeft') && this.dodgeT <= 0 && (this.launchT <= 0 || this.launchShield);
     if (this.launchT <= 0) this.handleDodgeInput(dt, inp);
     let lungeEnded = false;
     if (this.launchT > 0) {
       // Thrown: fly along the launch path tumbling, smashing through whatever is in the way
       this.launchT -= dt;
+      // BREAKOUT.launch s in, Ctrl breaks out of it (not out of the pocket dimension's throw home)
+      const age = (this.launchAge += dt);
+      if (age >= BREAKOUT.launch && this.launchT > 0 && !this.ctx.pocket?.thrown) {
+        if (age - dt < BREAKOUT.launch && this.breakoutCd <= 0) this.ctx.hud.message('HOLD CTRL TO BREAK OUT', 1);
+        this.holdBreakout(dt, inp);
+      }
       this.launchVel.y -= 8 * dt;
       this.vel.copy(this.launchVel);
       this.tumble += dt * 9;
@@ -392,10 +432,7 @@ export class Player {
   updateDown(dt, inp) {
     this.downT -= dt;
     this.blocking = false;
-    if (inp.down('ControlLeft') && this.breakoutCd <= 0) {
-      this.boHeld += dt;
-      if (this.boHeld >= 0.12) this.breakout();
-    } else this.boHeld = 0;
+    this.holdBreakout(dt, inp);
     const f = 1 - Math.min(1, 3 * dt);
     this.vel.x *= f;
     this.vel.z *= f;
@@ -407,11 +444,14 @@ export class Player {
   }
 
   // Throw the hero: vel (m/s) for `time` seconds, no control until it ends.
-  launch(vel, time) {
+  // shielded: they blocked it; still thrown, but the shield stays up for as long as they hold Ctrl.
+  launch(vel, time, shielded = false) {
     this.launchVel.copy(vel);
     this.launchT = time;
+    this.launchAge = 0;
     this.launchStuck = 0;
-    this.blocking = false;
+    this.launchShield = shielded && this.blocking;
+    this.blocking = this.launchShield;
     this.dodgeT = 0;
     this.lungeT = 0;
     this.atk = null;
@@ -641,6 +681,13 @@ export class Player {
       // Forearms crossed in front of the face
       Object.assign(p, { tilt: Math.min(p.tilt ?? 0, 0) * 0.5 - 0.1, sL: 1.35, sR: 1.35, eL: 1.7, eR: 1.7, spread: -0.25, kL: -0.25, kR: -0.25 });
     }
+    // Charging a shot (powers.js sets chargePose): hands cupped together around the ball of energy
+    // at the right side; firing the beam: both arms thrust out at the crosshair
+    if (this.chargePose === 'charge') Object.assign(p, { sL: 0.55, sR: 0.3, eL: 1.75, eR: 1.45, spread: -0.45 });
+    else if (this.chargePose === 'beam') {
+      const aimX = Math.PI / 2 + this.pitch - (p.tilt ?? 0);
+      Object.assign(p, { sL: aimX, sR: aimX, eL: 0.05, eR: 0.05, spread: -0.12 });
+    }
 
     let fast = false;
     if (this.atk) {
@@ -681,7 +728,7 @@ export class Player {
     // (the pose's stride is only used by the procedural rig). Casting still aims the right arm.
     const free = this.grounded && !this.wallRun && !this.atk && !this.blocking && this.dodgeT <= 0 && this.fall <= 0.01 && !knelt;
     const loco = free
-      ? { clip: hs > 6 ? 'run' : hs > 0.8 ? 'walk' : 'idle', speed: hs, mask: this.castT > 0 ? 'armR' : null }
+      ? { clip: hs > 6 ? 'run' : hs > 0.8 ? 'walk' : 'idle', speed: hs, mask: this.chargePose ? 'arms' : this.castT > 0 ? 'armR' : null }
       : null;
     const snap = this.dodgeT > 0 || this.landT > LAND.time - 0.05; // (hits the landing pose at once)
     this.rig.pose(p, snap ? 1 : 1 - Math.exp(-(fast || this.kickT > 0 ? 30 : 14) * dt), dt, loco);
@@ -690,7 +737,7 @@ export class Player {
     // Flying: leaning into turns.
     const flying = this.movement === 'flight' && !this.grounded && !this.wallRun;
     this.spin.rotation.set(this.fall * 1.45, 0, this.bank);
-    if (this.launchT > 0 && this.launchVel.lengthSq() > 1) this.spin.rotation.x = this.tumble; // tumbling head over heels (not while held)
+    if (this.launchT > 0 && this.launchVel.lengthSq() > 1 && !this.blocking) this.spin.rotation.x = this.tumble; // tumbling head over heels (not while held, or behind the shield)
     this.spin.position.y = this.rig.hipY * (1 - this.fall * 0.65 - this.land * 0.5);
     if (!flying) this.bank *= Math.exp(-8 * dt);
     this.kickT = flying ? Math.max(0, this.kickT - dt) : 0;

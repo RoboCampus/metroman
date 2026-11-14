@@ -2,15 +2,32 @@ import * as THREE from 'three';
 
 // DCUO-style weapon combat:
 //   LMB tap = quick melee, LMB hold = lunging melee (Interrupt)
-//   RMB tap = quick ranged, RMB hold = heavy ranged (Block Breaker)
+//   RMB tap = quick ranged, RMB hold = charge a heavy shot (Block Breaker) that fires on release:
+//     the longer the hold, the bigger and stronger it is and the more power it drains; held for
+//     5 seconds it becomes a kamehameha beam, which takes a big chunk of power on top
 //   Hold L-Ctrl = Block (tap a direction while blocking to dodge). Counter triangle: Block Breaker > Block > Interrupt > Block Breaker.
 // Inputs chain into combos when entered in sequence.
 
 const HOLD = 0.28; // seconds a button must be held to count as "hold"
+// Charged shot: full after `full` s of charging (5 s of holding in all), draining `drain` power/s
+// meanwhile; a full charge with `beamCost` power left fires the beam (costing that too).
+const CHARGE = { full: 5 - HOLD, drain: 8, beamCost: 45 };
 // Flying lunge (hold melee, with its animation): homes in on a target this far away, or flies this
 // far ahead without one, then the right hook explodes on impact.
 // range/free: metres to a target / with none; clip: the lunge animation's playback speed (shorter flight)
-const LUNGE = { range: 80, free: 50, maxSpeed: 280, clip: 1.4, dmg: 45, knock: 22, blast: 7, blastDmg: 25 };
+// knock: how hard the hook launches what it hits, along the lunge (`lift` adds a little up)
+const LUNGE = { range: 80, free: 50, maxSpeed: 280, clip: 1.4, dmg: 45, knock: 34, lift: 0.3, blast: 7, blastDmg: 25 };
+// Lunges chain: hold again within `window` s of the hook landing for the next one, up to `max` in a
+// row; the last hits `finisher` times harder (damage, launch and blast)
+const CHAIN = { max: 3, window: 1.2, finisher: 1.5 };
+// The lunge homes in on its target the whole way. If the target pulls away it chases, speeding up by
+// `accel` m/s² (at least `min` m/s), for up to `extra` s past the planned flight; `arrive`: metres from
+// the target's surface that count as there. Only a target that gets far enough away escapes.
+const HOME = { min: 45, accel: 220, extra: 0.7, arrive: 1.6 };
+// Tap combo (hooks and the finisher): the animations play `speed` times faster (2.5+ hooks a second),
+// and each blow steps the hero up to `step` m forward over `stepT` s: at the locked target if there
+// is one, else at an enemy just in front, else straight ahead; never closer than `gap` m to the target
+const JAB = { speed: 1.35, step: 5, stepT: 0.14, gap: 1.5 };
 const COMBO_WINDOW = 0.9; // max gap between inputs in a combo
 const HIT_WINDOW = 2.5; // hit counter resets after this long without a hit
 const BUSY = { mt: 0.22, mh: 0.45, rt: 0.2, rh: 0.42 };
@@ -35,6 +52,9 @@ export class Combat {
     this.queued = null;
     this.busyT = 0;
     this.timers = [];
+    this.homing = null; // the flying lunge in flight, chasing its target
+    this.chain = 0; // lunges in a row so far
+    this.chainT = 0; // time left to hold for the next one
     this.hits = 0;
     this.hitT = 0;
     this.hitstopT = 0;
@@ -42,7 +62,7 @@ export class Combat {
     this.jab = 1;
     this.slots = [
       { id: 'melee', key: 'LMB', name: 'Strike · hold Lunge', icon: '👊' },
-      { id: 'ranged', key: 'RMB', name: 'Blast · hold Breaker', icon: '🎯' },
+      { id: 'ranged', key: 'RMB', name: 'Blast · hold to charge (5 s: beam)', icon: '🎯' },
       { id: 'block', key: 'Ctrl', name: 'Block · Breakout', icon: '🛡️', cd: 6, timer: 0 },
     ];
   }
@@ -80,6 +100,37 @@ export class Combat {
     return tapKind;
   }
 
+  // Right button: a tap fires on release; held past HOLD it charges (see CHARGE) and fires the
+  // charged shot on release. The charge stops growing when the power runs out.
+  readCharge(m, dt) {
+    const c = this.right, { player, hud } = this.ctx;
+    if (m.rightDown) Object.assign(c, { active: true, held: 0, t: 0, empty: false, full: false });
+    if (!c.active) return null;
+    c.held += dt;
+    if (m.right) {
+      if (c.held < HOLD) return null;
+      if (c.t < CHARGE.full) {
+        const need = CHARGE.drain * dt;
+        if (player.power >= need) {
+          player.power -= need;
+          c.t = Math.min(CHARGE.full, c.t + dt);
+        } else if (!c.empty) {
+          c.empty = true;
+          hud.message('NOT ENOUGH POWER', 0.8);
+        }
+      }
+      const full = c.t >= CHARGE.full;
+      if (full && !c.full) hud.message(player.power >= CHARGE.beamCost ? 'BEAM READY - RELEASE!' : 'NOT ENOUGH POWER FOR THE BEAM', 1);
+      c.full = full;
+      this.ctx.getPowers().charging(c.t / CHARGE.full, full && player.power >= CHARGE.beamCost, dt);
+      return null;
+    }
+    c.active = c.full = false;
+    if (c.held < HOLD) return 'rt';
+    this.charge = { k: c.t / CHARGE.full, beam: c.t >= CHARGE.full && player.power >= CHARGE.beamCost };
+    return 'rh';
+  }
+
   update(dt) {
     const { input, player } = this.ctx;
     this.sinceAttack += dt;
@@ -88,6 +139,7 @@ export class Combat {
     if (this.histT <= 0) this.hist.length = 0;
     this.hitT -= dt;
     if (this.hitT <= 0) this.hits = 0;
+    this.chainT -= dt;
     this.slots[2].timer = Math.max(0, player.breakoutCd);
     for (let i = this.timers.length - 1; i >= 0; i--) {
       const tm = this.timers[i];
@@ -98,14 +150,16 @@ export class Combat {
       }
     }
 
+    if (this.homing) this.updateHoming(dt);
+
     const m = input.mouse;
     if (player.dead || player.downT > 0 || player.blocking) {
-      this.left.active = this.right.active = false;
+      this.left.active = this.right.active = false; // (a charge is lost, power and all)
       this.queued = null;
       return;
     }
     const l = this.readButton(this.left, m.left, m.leftDown, dt, 'mt', 'mh');
-    const r = this.readButton(this.right, m.right, m.rightDown, dt, 'rt', 'rh');
+    const r = this.readCharge(m, dt);
     const next = l || r;
     if (next) this.queued = next;
     if (this.queued && this.busyT <= 0 && player.dodgeT <= 0) {
@@ -140,7 +194,10 @@ export class Combat {
     if (kind === 'mt') this.melee(combo?.name === 'Flurry Finisher' ? 'finisher' : 'jab', taps);
     else if (kind === 'mh') this.melee(combo?.name === 'Rising Uppercut' ? 'uppercut' : 'lunge', taps);
     else if (kind === 'rt') powers.ranged();
-    else powers.rangedHeavy(!!combo);
+    else if (this.charge?.beam) {
+      this.ctx.player.power -= CHARGE.beamCost;
+      this.busyT = powers.kamehameha();
+    } else powers.rangedHeavy(!!combo, this.charge?.k ?? 0);
   }
 
   // Ground combo animations (assets/anims/hero_combat.glb): left hook, right hook, then the uppercut
@@ -160,10 +217,25 @@ export class Combat {
     const chest = _a.copy(player.pos);
     chest.y += 1.2;
     // Melee magnetism: lunge to the nearest enemy in front of the camera.
-    const target = enemies.meleeTarget(chest, aim.dir, heavy ? 16 : 6, Math.cos(heavy ? 0.6 : 1.0));
+    const lock = this.ctx.lockOn?.target;
+    const target = !heavy && lock && !lock.dead ? lock : enemies.meleeTarget(chest, aim.dir, heavy ? 16 : 6, Math.cos(heavy ? 0.6 : 1.0));
     const dir = new THREE.Vector3();
     let lungeT = 0.06;
-    if (target) {
+    if (!heavy) {
+      // Hooks: a short step into the punch, toward the target (along the ground when on it)
+      let room = JAB.step;
+      if (target) {
+        dir.subVectors(enemies.center(target, _b), chest);
+        room = Math.min(room, dir.length() - JAB.gap);
+      } else dir.set(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+      const step = _b.copy(dir);
+      if (player.grounded) step.y = 0;
+      dir.normalize();
+      if (room > 0.2 && step.lengthSq() > 1e-4) {
+        lungeT = JAB.stepT;
+        player.lunge(step.normalize(), room / lungeT, lungeT);
+      }
+    } else if (target) {
       dir.subVectors(enemies.center(target, _b), chest);
       const dist = dir.length();
       dir.normalize();
@@ -177,7 +249,7 @@ export class Combat {
     }
     const anim = { jab: 'jab', finisher: 'kick', lunge: 'lunge', uppercut: 'uppercut' }[move];
     this.jab = -this.jab;
-    const clip = player.attack(anim, heavy ? 0.42 : 0.24, Math.atan2(-dir.x, -dir.z), this.jab, Combat.clipFor(move, taps));
+    const clip = player.attack(anim, heavy ? 0.42 : 0.24, Math.atan2(-dir.x, -dir.z), this.jab, Combat.clipFor(move, taps), false, heavy ? 1 : JAB.speed);
     // With an animation, the blow lands on its contact frame and the next attack can start from
     // its cancel frame
     if (clip) this.busyT = clip.cancel;
@@ -244,7 +316,10 @@ export class Combat {
     const aim = this.ctx.getAim(LUNGE.range, 25);
     const chest = _a.copy(player.pos);
     chest.y += 1.2;
-    const target = enemies.meleeTarget(chest, aim.dir, LUNGE.range, Math.cos(0.5));
+    // Locked on: straight at the target (flying as far as the lunge goes); otherwise the nearest
+    // enemy in front of the camera
+    const lock = this.ctx.lockOn?.target;
+    const target = lock && !lock.dead ? lock : enemies.meleeTarget(chest, aim.dir, LUNGE.range, Math.cos(0.5));
     const dir = new THREE.Vector3();
     if (target) dir.subVectors(enemies.center(target, _b), chest).normalize();
     else {
@@ -254,6 +329,10 @@ export class Combat {
     }
     const clip = player.attack('lunge', 0.42, Math.atan2(-dir.x, -dir.z), 1, 'g_lunge', true, LUNGE.clip);
     if (!clip) return false;
+    // Which lunge of the chain this is
+    const n = (this.chain = this.chainT > 0 && this.chain < CHAIN.max ? this.chain + 1 : 1);
+    this.chainT = 0;
+    if (n > 1) this.ctx.hud.combo(n === CHAIN.max ? 'Lunge Finisher' : `Lunge x${n}`);
     this.busyT = clip.cancel;
     const travel = Math.max(0.1, clip.hit[0] - clip.launch);
     this.after(clip.launch, () => {
@@ -266,29 +345,81 @@ export class Combat {
         dist = Math.max(0, dir.length() - 1.6);
         dir.normalize();
       }
-      if (dist > 0.5) player.lunge(dir, Math.min(LUNGE.maxSpeed, dist / travel), travel);
+      // (too far to make it by the hook's contact frame at top speed: fly longer, the hook lands on arrival)
+      const t = Math.max(travel, dist / LUNGE.maxSpeed);
+      const recover = clip.cancel - clip.hit[0];
+      if (target && !target.dead) {
+        // Home in on the target, wherever it goes (see updateHoming)
+        const speed = Math.max(HOME.min, dist / t);
+        this.homing = { target, dir, speed, t: 0, max: t + HOME.extra, recover, n };
+        player.lunge(dir, speed, 0.1);
+        this.busyT = this.homing.max + recover;
+      } else {
+        if (dist > 0.5) player.lunge(dir, dist / t, t);
+        this.busyT = Math.max(this.busyT, t + recover);
+        this.after(t, () => this.lungeImpact(dir, target, n));
+      }
       const T = player.trailColors();
       fx.burst(player.pos, 30, { speed: 10, life: 0.4, size: 1, c0: T[0], c1: T[1], drag: 3 });
       fx.ring(player.pos, player.glowColor(), 6, 0.3);
       player.shake(0.2, 0.2);
     });
-    this.after(clip.hit[0], () => this.lungeImpact(dir, target));
     return true;
   }
 
-  // The flying hook connects: a big explosion in the hero's energy colours.
-  lungeImpact(dir, target) {
+  // Steer the lunge at the target every frame. The hook lands as the hero gets there, or wherever
+  // they are when the chase runs out of time (the target got away).
+  updateHoming(dt) {
+    const H = this.homing, { player, enemies } = this.ctx;
+    if (player.dead || player.downT > 0 || player.launchT > 0 || player.blocking) {
+      this.homing = null; // knocked out of it
+      return;
+    }
+    H.t += dt;
+    const alive = !H.target.dead && enemies.list.includes(H.target);
+    if (!alive) H.max = Math.min(H.max, H.t + 0.1); // it's gone: finish the swing where it was
+    let gap = Infinity;
+    if (alive) {
+      const from = _a.copy(player.pos);
+      from.y += 1.2;
+      H.dir.subVectors(enemies.center(H.target, _b), from);
+      gap = Math.max(0, enemies.reach(H.target, from) - (H.target.spheres ? 0 : H.target.r) - HOME.arrive);
+      H.dir.normalize();
+    }
+    if (H.t > H.max - HOME.extra) H.speed = Math.min(LUNGE.maxSpeed, H.speed + HOME.accel * dt); // chasing
+    if (gap <= H.speed * dt || H.t >= H.max) {
+      // There (or out of time): stop on the spot and swing
+      if (gap > 0 && gap < Infinity && H.t < H.max) player.pos.addScaledVector(H.dir, gap);
+      player.lungeT = 0;
+      player.vel.multiplyScalar(0.1);
+      this.homing = null;
+      this.busyT = H.recover;
+      this.lungeImpact(H.dir, alive ? H.target : null, H.n);
+      return;
+    }
+    player.lunge(H.dir, H.speed, 0.1);
+    const face = Math.atan2(-H.dir.x, -H.dir.z);
+    if (player.atk) player.atk.facing = face;
+    else player.facing = face;
+  }
+
+  // The flying hook connects: a big explosion in the hero's energy colours. Whatever it hits is
+  // launched the way the hero was flying. n: the lunge's place in the chain (the last hits harder).
+  lungeImpact(dir, target, n = 1) {
     const { player, enemies, fx } = this.ctx;
     const T = player.trailColors();
+    const f = n === CHAIN.max ? CHAIN.finisher : 1;
+    this.chainT = n < CHAIN.max ? CHAIN.window : 0;
     const p = _c.copy(player.pos);
     p.y += 1.2;
     p.addScaledVector(dir, 1.4);
-    const k = dir.clone().setY(0).normalize().multiplyScalar(LUNGE.knock);
-    k.y = 7;
+    const along = dir.clone();
+    if (along.y > -0.2) along.y += LUNGE.lift; // (a lunge down at them still drives them into the ground)
+    along.normalize();
     if (target && !target.dead && enemies.reach(target, p) < 5) {
-      enemies.damage(target, LUNGE.dmg, { type: 'interrupt', knock: k, ...player.meleeStatus('uppercut') });
+      enemies.damage(target, LUNGE.dmg * f, { type: 'interrupt', knock: along.clone().multiplyScalar(LUNGE.knock * f), ...player.meleeStatus('uppercut') });
     }
-    enemies.damageRadius(p, LUNGE.blast, LUNGE.blastDmg, LUNGE.knock, 0, { type: 'power', skip: target });
+    enemies.damageRadius(p, LUNGE.blast * f, LUNGE.blastDmg * f, LUNGE.knock * 0.7 * f, 0, { type: 'power', skip: target, along });
     this.ctx.traffic?.damageRadius(p, LUNGE.blast + 1, 120, 30);
     this.ctx.props?.damageRadius(p, LUNGE.blast, 30);
     this.ctx.destruction?.damage(p.clone().addScaledVector(dir, 1.5), 3.5, dir);

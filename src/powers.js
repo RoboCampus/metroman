@@ -5,6 +5,12 @@ const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3
 const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
 
 const FIRE_C0 = [1, 0.85, 0.45], FIRE_C1 = [0.9, 0.12, 0.0];
+// The kamehameha (a full 5 s charge, see combat.js): a beam out of both hands for `time` s that
+// follows the crosshair (turning at `turn`), burns everything along it and blasts holes in
+// buildings where it lands (every `carve` s).
+const BEAM = { time: 3, r: 2.2, dps: 260, range: 450, turn: 3, carve: 0.12, carveR: 4.5, knock: 30 };
+const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 20, 1, true).translate(0, 0.5, 0);
+const UP = new THREE.Vector3(0, 1, 0);
 const ELEC_C0 = [0.85, 0.97, 1], ELEC_C1 = [0.15, 0.45, 1];
 
 export function createPowerSet(ctx, type) {
@@ -50,7 +56,17 @@ class PowerSet {
     a.timer = a.cd;
     p.cast();
     this.ctx.combat.sinceAttack = 0;
-    this[a.fn]();
+    this.atLock(() => this[a.fn]());
+  }
+
+  // Powers aim at the lock-on target (when there is one) instead of the crosshair
+  atLock(fn) {
+    this.ctx.aimAtLock = true;
+    try {
+      fn();
+    } finally {
+      this.ctx.aimAtLock = false;
+    }
   }
 
   after(t, fn) {
@@ -69,6 +85,8 @@ class PowerSet {
       }
     }
     this.updateProjectiles(dt);
+    this.updateCharge(dt);
+    this.updateBeam(dt);
 
     if (player.dead || player.downT > 0 || player.blocking) {
       if (this.channeling) this.stopChannel();
@@ -80,7 +98,7 @@ class PowerSet {
       player.power -= this.channelCost * dt;
       player.cast();
       this.ctx.combat.sinceAttack = 0;
-      this.channel(dt);
+      this.atLock(() => this.channel(dt));
     } else if (this.channeling) this.stopChannel();
     this.channeling = ch;
 
@@ -93,8 +111,131 @@ class PowerSet {
     this.ctx.fx.handLight.intensity = 0;
   }
 
+  // ---------------------------------------------------------------- charging (hold right click)
+  // Called by combat every frame while charging: k 0..1, ready = a release fires the beam.
+  // A ball of energy grows in the cupped hands, pulling energy in.
+  charging(k, ready) {
+    const { player, fx, scene } = this.ctx;
+    if (!this.orb) {
+      this.orb = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), new THREE.MeshBasicMaterial({
+        color: this.glowHex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+      }));
+      this.orbCore = new THREE.Mesh(this.orb.geometry, new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false }));
+      this.orbCore.scale.setScalar(0.5);
+      this.orb.add(this.orbCore);
+      scene.add(this.orb);
+    }
+    this.charged = true;
+    const t = performance.now() / 1000;
+    const hand = player.getHandPos(_a);
+    this.orb.position.copy(hand);
+    this.orb.visible = true;
+    this.orb.scale.setScalar(0.12 + 0.5 * k + (ready ? 0.12 + Math.sin(t * 30) * 0.06 : Math.sin(t * 18) * 0.02 * k));
+    this.orb.material.opacity = 0.35 + 0.25 * k;
+    // Energy sucked in from all around, faster and more of it as it grows
+    for (let i = 0, n = Math.round(1 + 4 * k + (ready ? 3 : 0)); i < n; i++) {
+      randomDir(_b).multiplyScalar(1.5 + 2 * k);
+      fx.spawn(hand.x + _b.x, hand.y + _b.y, hand.z + _b.z, -_b.x / 0.3, -_b.y / 0.3, -_b.z / 0.3, 0.3, 0.15 + 0.15 * k, 0.03, this.c0, this.c1, 0, 0);
+    }
+    const L = fx.handLight;
+    L.position.copy(hand);
+    L.color.set(this.glowHex);
+    L.intensity = 20 + 120 * k + (ready ? 60 : 0);
+    if (ready && !this.wasReady) {
+      fx.ring(hand, this.glowHex, 3, 0.35, _b.set(0, 1, 0));
+      player.shake(0.2, 0.2);
+    }
+    this.wasReady = ready;
+  }
+
+  // Not charging this frame: put the ball away. Sets the hero's pose for charging / the beam.
+  updateCharge() {
+    const player = this.ctx.player;
+    if (!this.charged && this.orb?.visible) {
+      this.orb.visible = false;
+      this.wasReady = false;
+      if (!this.channeling && !this.beam) this.ctx.fx.handLight.intensity = 0;
+    }
+    player.chargePose = this.beam ? 'beam' : this.charged ? 'charge' : null;
+    if (this.charged) player.cast(); // (faces where the camera looks)
+    this.charged = false;
+  }
+
+  // ---------------------------------------------------------------- the kamehameha
+  // Returns how long it lasts (combat waits that long before the next attack).
+  kamehameha() {
+    const { fx, hud, player, scene } = this.ctx;
+    const { from, dir } = this.aimFromHand(BEAM.range);
+    if (!this.beamMesh) {
+      const mat = (color, opacity) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide });
+      this.beamMesh = new THREE.Group();
+      this.beamCore = new THREE.Mesh(beamGeo, mat(0xffffff, 0.9));
+      this.beamGlow = new THREE.Mesh(beamGeo, mat(this.glowHex, 0.3));
+      this.beamMesh.add(this.beamCore, this.beamGlow);
+      scene.add(this.beamMesh);
+    }
+    this.beam = { t: BEAM.time, dir: dir.clone(), carveT: 0 };
+    this.beamMesh.visible = true;
+    fx.flash(from, this.glowHex, 3000, 60, 0.3);
+    fx.ring(from, this.glowHex, 6, 0.35, dir);
+    player.shake(0.6, 0.4);
+    hud.message('HA-MEA-MEA!', 1.5);
+    return BEAM.time;
+  }
+
+  updateBeam(dt) {
+    const B = this.beam;
+    if (!B) return;
+    const { player, world, enemies, fx, destruction, traffic } = this.ctx;
+    B.t -= dt;
+    if (B.t <= 0 || player.dead || player.downT > 0) {
+      this.beam = null;
+      this.beamMesh.visible = false;
+      fx.handLight.intensity = 0;
+      return;
+    }
+    // Follows the crosshair (a little behind); the hero is braced, barely moving
+    const aim = this.ctx.getAim(BEAM.range);
+    const from = player.getHandPos(_a);
+    B.dir.lerp(_b.copy(aim.point).sub(from).normalize(), 1 - Math.exp(-BEAM.turn * dt)).normalize();
+    from.addScaledVector(B.dir, 0.5);
+    player.vel.multiplyScalar(Math.exp(-10 * dt));
+    const len = Math.max(1, world.raycastHit(from, B.dir, BEAM.range));
+    const end = _c.copy(from).addScaledVector(B.dir, len);
+    // Grows in, flickers, thins out at the end
+    const k = Math.min(1, (BEAM.time - B.t) / 0.15) * Math.min(1, B.t / 0.3), flick = 1 + Math.sin(B.t * 70) * 0.08;
+    this.beamMesh.position.copy(from);
+    this.beamMesh.quaternion.setFromUnitVectors(UP, B.dir);
+    this.beamCore.scale.set(BEAM.r * 0.45 * k * flick, len, BEAM.r * 0.45 * k * flick);
+    this.beamGlow.scale.set(BEAM.r * k * flick, len, BEAM.r * k * flick);
+    // Everything along it burns
+    for (const e of enemies.list) {
+      if (e.dead) continue;
+      const c = enemies.center(e, _d).sub(from), along = THREE.MathUtils.clamp(c.dot(B.dir), 0, len);
+      if (c.addScaledVector(B.dir, -along).length() < BEAM.r + e.r) {
+        enemies.damage(e, BEAM.dps * dt, { type: 'power', knock: _d.copy(B.dir).multiplyScalar(BEAM.knock * dt) });
+      }
+    }
+    traffic?.damageRadius(end, BEAM.carveR, BEAM.dps * dt, 15);
+    // ...and it blasts its way into whatever it hits
+    B.carveT -= dt;
+    if (B.carveT <= 0 && len < BEAM.range - 0.5) {
+      B.carveT = BEAM.carve;
+      destruction?.damage(end.clone(), BEAM.carveR, B.dir.clone());
+    }
+    if (Math.random() < dt * 40) fx.burst(end, 10, { speed: 25, life: 0.45, size: 1.8, c0: this.c0, c1: this.c1, drag: 2 });
+    if (Math.random() < dt * 30) fx.burst(from, 4, { speed: 6, life: 0.2, size: 1, c0: [1, 1, 1], c1: this.c1 });
+    if (Math.random() < dt * 12) fx.flash(end, this.glowHex, 2500, 50, 0.1);
+    const L = fx.handLight;
+    L.position.copy(from);
+    L.color.set(this.glowHex);
+    L.intensity = 250;
+    player.shake(0.35, 0.15);
+  }
+
   dispose() {
     this.stopChannel();
+    for (const m of [this.orb, this.beamMesh]) if (m) this.ctx.scene.remove(m);
     for (const p of this.projectiles) if (p.mesh) this.ctx.scene.remove(p.mesh);
     this.projectiles.length = 0;
     this.timers.length = 0;
@@ -163,7 +304,9 @@ class FirePowers extends PowerSet {
   constructor(ctx) {
     super(ctx);
     this.channelCost = 16;
-    this.rangedInfo = { name: 'Fireball · hold Blazing Lance', icon: '🔥' };
+    this.rangedInfo = { name: 'Fireball · hold to charge', icon: '🔥' };
+    this.glowHex = 0xff7a20;
+    [this.c0, this.c1] = [FIRE_C0, FIRE_C1];
     this.init([
       { id: 'a1', key: '1', name: 'Inferno Nova', icon: '💥', cd: 7, cost: 25, fn: 'inferno' },
       { id: 'a2', key: '2', name: 'Meteor', icon: '☄️', cd: 10, cost: 35, fn: 'meteor' },
@@ -204,11 +347,11 @@ class FirePowers extends PowerSet {
       life: 200 / speed,
       // Spread the trail along this frame's path so it stays continuous at high speed.
       trail: (p, dt) => {
-        for (let i = 0; i < 6 * scale; i++) {
+        for (let i = 0, n = Math.min(6 * scale, 6 + 2 * scale); i < n; i++) {
           const back = Math.random() * dt;
           fx.spawn(p.pos.x - p.vel.x * back, p.pos.y - p.vel.y * back, p.pos.z - p.vel.z * back,
             (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 3,
-            0.35, 1.1 * scale, 0.2, FIRE_C0, FIRE_C1, 4, 1);
+            0.35, 1.1 * Math.min(scale, 2 + 0.4 * scale), 0.2, FIRE_C0, FIRE_C1, 4, 1);
         }
       },
       onHit,
@@ -220,15 +363,21 @@ class FirePowers extends PowerSet {
     this.fireball(from, dir, 360, 1, (pos, n) => this.explode(pos, 4.5, 24, 9, 1, { type: 'tap', burn: 3 }, n));
   }
 
-  // Block Breaker: a big, fast lance of fire.
-  rangedHeavy(combo) {
+  // Block Breaker, charged (charge 0..1, see combat.js): from a big fast fireball up to a huge,
+  // slower one that flattens everything around where it lands and blows holes in buildings.
+  rangedHeavy(combo, charge = 0) {
     const { player } = this.ctx;
     const { from, dir } = this.aimFromHand();
     player.attack('heavyCast', 0.4, player.yaw);
     player.cast();
-    const k = combo ? 1.5 : 1;
-    this.flames(from, 20, 6, 1, 0.3);
-    this.fireball(from, dir, 300, 2 * k, (pos, n) => this.explode(pos, 6 * k, 42 * k, 16, 1.6 * k, { type: 'bb', burn: 4 }, n));
+    const k = combo ? 1.5 : 1, c = charge;
+    const size = (2 + 5 * c) * k, r = (6 + 12 * c) * k, dmg = (42 + 140 * c) * k, big = (1.6 + 2.4 * c) * k;
+    this.flames(from, 20 + 40 * c, 6 + 8 * c, 1 + c, 0.3);
+    if (c > 0.3) player.shake(0.2 + 0.3 * c, 0.25);
+    this.fireball(from, dir, 300 - 150 * c, size, (pos, n) => {
+      this.explode(pos, r, dmg, 16 + 16 * c, big, { type: 'bb', burn: 4 + 3 * c }, n);
+      if (c > 0.25) this.ctx.destruction?.damage(pos.clone(), r * 0.35, dir.clone());
+    });
   }
 
   channel(dt) {
@@ -329,7 +478,9 @@ class ElectricPowers extends PowerSet {
     super(ctx);
     this.channelCost = 15;
     this.arcT = 0;
-    this.rangedInfo = { name: 'Bolt · hold Overload', icon: '⚡' };
+    this.rangedInfo = { name: 'Bolt · hold to charge', icon: '⚡' };
+    this.glowHex = 0x5ab0ff;
+    [this.c0, this.c1] = [ELEC_C0, ELEC_C1];
     this.init([
       { id: 'a1', key: '1', name: 'Thunderclap', icon: '💫', cd: 7, cost: 25, fn: 'thunderclap' },
       { id: 'a2', key: '2', name: 'Lightning Storm', icon: '⛈️', cd: 12, cost: 35, fn: 'storm' },
@@ -366,13 +517,22 @@ class ElectricPowers extends PowerSet {
     this.bolt(0.35, 17, { type: 'tap', charge: 4 });
   }
 
-  // Block Breaker: a thick overload bolt that also arcs to one nearby enemy.
-  rangedHeavy(combo) {
-    const { player, enemies } = this.ctx;
+  // Block Breaker, charged (charge 0..1, see combat.js): a thick overload bolt that also arcs to one
+  // nearby enemy; charged up it's thicker and harder and bursts where it lands.
+  rangedHeavy(combo, charge = 0) {
+    const { player, enemies, fx } = this.ctx;
     player.attack('heavyCast', 0.4, player.yaw);
     player.cast();
-    const k = combo ? 1.5 : 1;
-    const { target, to } = this.bolt(0.9 * k, 42 * k, { type: 'bb', charge: 5 });
+    const k = combo ? 1.5 : 1, c = charge;
+    const { target, to } = this.bolt((0.9 + 1.6 * c) * k, (42 + 140 * c) * k, { type: 'bb', charge: 5 });
+    if (c > 0.1) {
+      const r = (3 + 9 * c) * k;
+      enemies.damageRadius(to, r, 60 * c * k, 10 + 16 * c, 0.3, { type: 'power', skip: target, charge: 4 });
+      this.sparks(to, Math.round(30 + 60 * c), 14 + 14 * c, 0.6 + c);
+      fx.ring(to, 0x6fc8ff, r * 1.2, 0.4);
+      if (c > 0.25) this.ctx.destruction?.damage(to.clone(), r * 0.35, to.clone().sub(player.pos).normalize());
+      player.shake(0.2 + 0.3 * c, 0.25);
+    }
     if (target) {
       const next = enemies.nearest(to, 12, [target]);
       if (next) {

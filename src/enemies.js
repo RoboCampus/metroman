@@ -8,6 +8,7 @@ import { ALIEN_STATS } from './alien.js';
 import { EGG_STATS } from './egg.js';
 import { CHARGER_STATS } from './charger.js';
 import { RAPTOR_STATS } from './raptor.js';
+import { BOB_STATS } from './bob.js';
 import { SQUID_STATS } from './squid.js';
 
 const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _u = new THREE.Vector3(), _t = new THREE.Vector3();
@@ -42,6 +43,7 @@ const STATS = {
   egg: EGG_STATS,
   charger: CHARGER_STATS,
   raptor: RAPTOR_STATS,
+  bob: BOB_STATS,
   squid: SQUID_STATS,
 };
 
@@ -668,8 +670,10 @@ export class Enemies {
       if (_w.lengthSq() < 1e-6) _w.set(0, 1, 0);
       _w.normalize();
       _w.y += 0.6;
-      _w.normalize().multiplyScalar(knock * f);
-      this.damage(e, amt * f, { ...opts, skip: undefined, noBoss: undefined, knock: _w.clone(), stun }); // clone: counter() reuses _w
+      _w.normalize();
+      if (opts.along) _w.multiplyScalar(0.35).add(opts.along).normalize(); // (mostly blown the way the blast was going)
+      _w.multiplyScalar(knock * f);
+      this.damage(e, amt * f, { ...opts, skip: undefined, noBoss: undefined, along: undefined, knock: _w.clone(), stun }); // clone: counter() reuses _w
     }
     this.ctx.traffic?.damageRadius(c, r, amt, knock); // area attacks also wreck cars
     if (knock > 3) this.ctx.props?.damageRadius(c, r, knock); // ...and smash trees, benches, hydrants

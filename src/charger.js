@@ -8,7 +8,8 @@ import { createRig } from './models.js';
 //   - Charge: he runs straight at the hero at 42 m/s (steering a little), smashing cars and street
 //     furniture out of the way.
 //   - If he connects and the hero isn't dodging or blocking, the hero is launched at 200 mph for
-//     3 seconds. A block stops him dead (and stuns him); a dodge makes him miss and run past.
+//     3 seconds. Blocked, the hero is still launched but the shield stays up (little damage) for as
+//     long as they hold block, and he is stunned; a dodge makes him miss and run past.
 //   - Running into a wall stuns him; while stunned he's wide open.
 // Lives in enemies.list with its own update (like the bosses), so all attacks hurt him.
 
@@ -189,17 +190,18 @@ export class Charger {
       hud.callout('DODGED!', 'good'); // he thunders past
       return;
     }
+    const dir = this.dir.clone().setY(LAUNCH.lift).normalize();
     if (r === 'blocked') {
-      // Stopped dead against the block
-      player.vel.addScaledVector(this.dir, 12);
-      fx.burst(_w, 30, { speed: 10, life: 0.35, size: 0.8, c0: [0.7, 0.9, 1], c1: [0.2, 0.5, 1] });
-      player.shake(0.4, 0.3);
-      hud.callout('CHARGE BLOCKED!', 'good');
+      // The shield takes the hit (little damage) but they're still sent flying, shield up
+      player.launch(dir.multiplyScalar(LAUNCH.speed), LAUNCH.time, true);
+      fx.burst(_w, 40, { speed: 12, life: 0.4, size: 0.9, c0: [0.7, 0.9, 1], c1: [0.2, 0.5, 1] });
+      fx.ring(_w, 0x6ab8ff, 7, 0.35, this.dir);
+      player.shake(0.6, 0.35);
+      hud.callout('CHARGE BLOCKED · LAUNCHED!', 'good');
       this.recover(STUN.blocked);
       return;
     }
     // Full hit: launched at 200 mph
-    const dir = this.dir.clone().setY(LAUNCH.lift).normalize();
     if (!player.dead) player.launch(dir.multiplyScalar(LAUNCH.speed), LAUNCH.time);
     fx.burst(_w, 50, { speed: 18, life: 0.5, size: 1.2, c0: [1, 0.8, 0.5], c1: [0.8, 0.2, 0.1], drag: 2 });
     fx.flash(_w, 0xff6040, 1500, 30, 0.2);

@@ -17,6 +17,8 @@ import { EggSpawner } from './egg.js';
 import { Watcher } from './watcher.js';
 import { ChargerSpawner } from './charger.js';
 import { RaptorSpawner } from './raptor.js';
+import { BobSpawner } from './bob.js';
+import { LockOn } from './lockon.js';
 import { Pocket } from './pocket.js';
 import { DEFAULT_LOOK, PRESETS } from './player.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
@@ -169,6 +171,7 @@ ctx.eggs = new EggSpawner(ctx); // warden eggs come through rifts and cage the h
 // For the kaiju vs Impregno Man battle see bossfight.js.
 for (const s of [ctx.kaiju, ctx.impregno, ctx.aliens, ctx.eggs]) s.enabled = false;
 ctx.chargers = new ChargerSpawner(ctx); // bruisers that charge and launch the hero (J summons one)
+ctx.bob = new BobSpawner(ctx); // Bob, the metal man: patrols the city hunting the hero (V calls him)
 ctx.raptors = new RaptorSpawner(ctx); // flyers that ram the hero or grab and hurl them down (H summons one)
 ctx.watcher = new Watcher(ctx); // a glowing blue man watches from a black hole in the sky (M summons him)
 ctx.pocket = new Pocket(ctx); // his pocket dimension: fly into the white sphere of a lift (L) to get in
@@ -177,11 +180,22 @@ let powers = null;
 ctx.getPowers = () => powers;
 if (new URLSearchParams(location.search).has('debug')) Object.assign(window, { game: Object.assign(ctx, { renderer }) }); // console access for testing
 
+ctx.lockOn = new LockOn(ctx); // soft lock on the enemy nearest the crosshair; Caps Lock holds it
+
 const aim = { origin: new THREE.Vector3(), dir: new THREE.Vector3(), point: new THREE.Vector3(), target: null };
 const _tmp = new THREE.Vector3();
 // Crosshair ray with light aim assist. Returns a shared object.
+// While ctx.aimAtLock is set (powers casting), it aims straight at the lock-on target instead.
 ctx.getAim = (range = 160, assistDeg = 6) => {
   camera.getWorldPosition(aim.origin);
+  const lock = ctx.aimAtLock && ctx.lockOn.target;
+  if (lock) {
+    enemies.center(lock, aim.point);
+    aim.dir.subVectors(aim.point, aim.origin).normalize();
+    aim.target = lock;
+    aim.normal = null;
+    return aim;
+  }
   camera.getWorldDirection(aim.dir);
   const reach = range + player.curDist;
   const t = ctx.world.raycastHit(aim.origin, aim.dir, reach);
@@ -400,6 +414,7 @@ function tick(dt) {
     setPower(player.theme === 'fire' ? 'electric' : 'fire');
     hud.message(player.theme === 'fire' ? 'FIRE' : 'ELECTRICITY', 1);
   }
+  ctx.lockOn.update(dt);
   combat.update(dt);
   player.update(dt);
   powers.update(dt);
@@ -412,6 +427,7 @@ function tick(dt) {
     ctx.watcher.update(dt, input);
     ctx.chargers.update(dt, input);
     ctx.raptors.update(dt, input);
+    ctx.bob.update(dt, input);
     enemies.update(dt);
     city.update(dt, elapsed, player.pos);
     ctx.impacts.update(dt);
